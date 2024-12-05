@@ -4399,6 +4399,19 @@ static int rdtgroup_rename(struct kernfs_node *kn,
 	}
 
 	/*
+	 * Moving the group changes the CLOSID. Where the RMID is only
+	 * meaningful together with the CLOSID, the RMID index changes and the
+	 * monitor state cannot follow the move.
+	 */
+	if (rdtgrp->mon.parent != new_prdtgrp && resctrl_arch_mon_capable() &&
+	    resctrl_arch_rmid_idx_encode(rdtgrp->closid, rdtgrp->mon.rmid) !=
+	    resctrl_arch_rmid_idx_encode(new_prdtgrp->closid, rdtgrp->mon.rmid)) {
+		rdt_last_cmd_puts("Changing parent control group not supported\n");
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+
+	/*
 	 * If the MON group is monitoring CPUs, the CPUs must be assigned to the
 	 * current parent CTRL_MON group and therefore cannot be assigned to
 	 * the new parent, making the move illegal.
