@@ -164,6 +164,42 @@ static inline long get_user_reg(struct task_struct *task, int offset)
 }
 
 /*
+ * Is @target stopped after entering a syscall, but before it has been
+ * dispatched?  This is the same classification that
+ * ptrace_get_syscall_info_op() performs for PTRACE_GET_SYSCALL_INFO.
+ */
+static bool stopped_in_syscall_entry(struct task_struct *target)
+{
+	struct kernel_siginfo *info = target->last_siginfo;
+
+	if (!info)
+		return false;
+
+	if (info->si_code == (SIGTRAP | 0x80))
+		return target->ptrace_message == PTRACE_EVENTMSG_SYSCALL_ENTRY;
+
+	return info->si_code == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8));
+}
+
+static void update_syscall_orig_r0_after_ptrace(struct task_struct *target)
+{
+	struct pt_regs *regs = task_pt_regs(target);
+
+	/*
+	 * ARM_r0 holds the first syscall argument only before the syscall is
+	 * dispatched; seccomp, the syscall tracepoints and the syscall restart
+	 * code all read that argument from ARM_ORIG_r0 instead.  At a syscall
+	 * exit stop ARM_r0 holds the return value and must not be copied, and
+	 * for other exceptions ARM_ORIG_r0 is set to ~0 and carries no
+	 * meaning.
+	 */
+	if (!stopped_in_syscall_entry(target))
+		return;
+
+	regs->ARM_ORIG_r0 = regs->ARM_r0;
+}
+
+/*
  * this routine will put a word on the processes privileged stack.
  * the offset is how far from the base addr as stored in the THREAD.
  * this routine assumes that all the privileged stacks are in our
@@ -180,6 +216,8 @@ put_user_reg(struct task_struct *task, int offset, long data)
 
 	if (valid_user_regs(&newregs)) {
 		regs->uregs[offset] = data;
+		if (offset == 0)
+			update_syscall_orig_r0_after_ptrace(task);
 		ret = 0;
 	}
 
@@ -566,6 +604,7 @@ static int gpr_set(struct task_struct *target,
 		return -EINVAL;
 
 	*task_pt_regs(target) = newregs;
+	update_syscall_orig_r0_after_ptrace(target);
 	return 0;
 }
 
@@ -868,7 +907,7 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
 	if (test_thread_flag(TIF_SYSCALL_TRACEPOINT))
 		trace_sys_enter(regs, scno);
 
-	audit_syscall_entry(scno, regs->ARM_r0, regs->ARM_r1, regs->ARM_r2,
+	audit_syscall_entry(scno, regs->ARM_ORIG_r0, regs->ARM_r1, regs->ARM_r2,
 			    regs->ARM_r3);
 
 	return scno;
