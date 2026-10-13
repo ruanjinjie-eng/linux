@@ -225,6 +225,14 @@ static struct rmid_entry *resctrl_find_free_rmid(u32 closid)
 			return itr;
 	}
 
+	/*
+	 * If this CLOSID has RMIDs in limbo, return -EBUSY so userspace can
+	 * retry. Otherwise, the CLOSID is genuinely out of RMIDs.
+	 */
+	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID) &&
+	    closid_num_dirty_rmid[closid])
+		return ERR_PTR(-EBUSY);
+
 	return ERR_PTR(-ENOSPC);
 }
 
