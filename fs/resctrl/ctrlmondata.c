@@ -296,6 +296,9 @@ static int rdtgroup_parse_resource(char *resname, char *tok,
 	struct resctrl_schema *s;
 
 	list_for_each_entry(s, &resctrl_schema_all, list) {
+		if (s->res->invisible)
+			continue;
+
 		if (!strcmp(resname, s->name) && rdtgrp->closid < s->num_closid)
 			return parse_line(tok, s, rdtgrp);
 	}
@@ -389,7 +392,7 @@ out_unlock:
 }
 
 static void show_doms(struct seq_file *s, struct resctrl_schema *schema,
-		      char *resource_name, int closid)
+		      int closid)
 {
 	struct rdt_resource *r = schema->res;
 	struct rdt_ctrl_domain *dom;
@@ -399,8 +402,7 @@ static void show_doms(struct seq_file *s, struct resctrl_schema *schema,
 	/* Walking r->domains, ensure it can't race with cpuhp */
 	lockdep_assert_cpus_held();
 
-	if (resource_name)
-		seq_printf(s, "%*s:", max_name_width, resource_name);
+	seq_printf(s, "%*s:", max_name_width, schema->name);
 	list_for_each_entry_rcu(dom, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
 		if (sep)
 			seq_puts(s, ";");
@@ -444,8 +446,11 @@ int rdtgroup_schemata_show(struct kernfs_open_file *of,
 		} else {
 			closid = rdtgrp->closid;
 			list_for_each_entry(schema, &resctrl_schema_all, list) {
+				if (schema->res->invisible)
+					continue;
+
 				if (closid < schema->num_closid)
-					show_doms(s, schema, schema->name, closid);
+					show_doms(s, schema, closid);
 			}
 		}
 	} else {
@@ -956,7 +961,7 @@ int resctrl_io_alloc_cbm_show(struct kernfs_open_file *of, struct seq_file *seq,
 	 * either CDP resource are identical and accurately represent the CBMs
 	 * used for I/O.
 	 */
-	show_doms(seq, s, NULL, resctrl_io_alloc_closid(r));
+	show_doms(seq, s, resctrl_io_alloc_closid(r));
 
 out_unlock:
 	info_kn_unlock(of->kn);

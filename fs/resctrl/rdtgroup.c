@@ -2821,6 +2821,7 @@ static void rdt_disable_ctx(void)
 
 static int rdt_enable_ctx(struct rdt_fs_context *ctx)
 {
+	struct rdt_resource *r;
 	int ret = 0;
 
 	if (ctx->enable_cdpl2) {
@@ -2843,6 +2844,13 @@ static int rdt_enable_ctx(struct rdt_fs_context *ctx)
 
 	if (ctx->enable_debug)
 		resctrl_debug = true;
+
+	r = resctrl_arch_get_resource(RDT_RESOURCE_L2);
+	/* Only arm64 arch hides L2 resource by default */
+	if (IS_ENABLED(CONFIG_ARM64_MPAM) && !ctx->enable_l2)
+		r->invisible = true;
+	else
+		r->invisible = false;
 
 	return 0;
 
@@ -3366,6 +3374,7 @@ enum rdt_param {
 	Opt_cdpl2,
 	Opt_mba_mbps,
 	Opt_debug,
+	Opt_l2,
 	nr__rdt_params
 };
 
@@ -3374,6 +3383,7 @@ static const struct fs_parameter_spec rdt_fs_parameters[] = {
 	fsparam_flag("cdpl2",		Opt_cdpl2),
 	fsparam_flag("mba_MBps",	Opt_mba_mbps),
 	fsparam_flag("debug",		Opt_debug),
+	fsparam_flag("l2",		Opt_l2),
 	{}
 };
 
@@ -3381,6 +3391,7 @@ static int rdt_parse_param(struct fs_context *fc, struct fs_parameter *param)
 {
 	struct rdt_fs_context *ctx = rdt_fc2context(fc);
 	struct fs_parse_result result;
+	struct rdt_resource *r;
 	const char *msg;
 	int opt;
 
@@ -3403,6 +3414,12 @@ static int rdt_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		return 0;
 	case Opt_debug:
 		ctx->enable_debug = true;
+		return 0;
+	case Opt_l2:
+		r = resctrl_arch_get_resource(RDT_RESOURCE_L2);
+		if (!r->alloc_capable)
+			return -EINVAL;
+		ctx->enable_l2 = true;
 		return 0;
 	}
 
@@ -3727,6 +3744,9 @@ static int mkdir_mondata_all(struct kernfs_node *parent_kn,
 	 * in a domain like L3 are grouped into a resource whose domain is L3
 	 */
 	for_each_mon_capable_rdt_resource(r) {
+		if (r->invisible)
+			continue;
+
 		ret = mkdir_mondata_subdir_alldom(kn, r, prgrp);
 		if (ret)
 			goto out_destroy;
@@ -4482,10 +4502,12 @@ out:
 
 static int rdtgroup_show_options(struct seq_file *seq, struct kernfs_root *kf)
 {
+	bool l2_visible = !resctrl_arch_get_resource(RDT_RESOURCE_L2)->invisible;
+
 	if (resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L3))
 		seq_puts(seq, ",cdp");
 
-	if (resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L2))
+	if (l2_visible && resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L2))
 		seq_puts(seq, ",cdpl2");
 
 	if (is_mba_sc(resctrl_arch_get_resource(RDT_RESOURCE_MBA)))
@@ -4493,6 +4515,9 @@ static int rdtgroup_show_options(struct seq_file *seq, struct kernfs_root *kf)
 
 	if (resctrl_debug)
 		seq_puts(seq, ",debug");
+
+	if (IS_ENABLED(CONFIG_ARM64_MPAM) && l2_visible)
+		seq_puts(seq, ",l2");
 
 	return 0;
 }
