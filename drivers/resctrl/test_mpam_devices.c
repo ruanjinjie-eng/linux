@@ -382,7 +382,264 @@ static void test_mpam_reset_msc_bitmap(struct kunit *test)
 	mutex_unlock(&fake_msc.part_sel_lock);
 }
 
+/*
+ * The PRI/MIN/MAX/HDL values are carried in mpam_config and reach the
+ * component config through mpam_update_config()'s selective merge.
+ */
+static void test_mpam_update_config_values(struct kunit *test)
+{
+	struct mpam_config old = { }, new = { };
+	bool has_changes;
+
+	/* Nothing to merge without the feature bits: */
+	has_changes = mpam_update_config(&old, &new);
+	KUNIT_EXPECT_FALSE(test, has_changes);
+
+	mpam_set_feature(mpam_feat_cmax_cmax, &new);
+	new.cmax = 0x7f00;
+	mpam_set_feature(mpam_feat_cmax_cmin, &new);
+	new.cmin = 0x3f00;
+	mpam_set_feature(mpam_feat_intpri_part, &new);
+	new.intpri = 3;
+	mpam_set_feature(mpam_feat_mbw_min, &new);
+	new.mbw_min = 0x7f00;
+	mpam_set_feature(mpam_feat_mbw_max, &new);
+	new.mbw_max = 0xff00;
+	mpam_set_feature(mpam_feat_max_limit, &new);
+	new.max_limit = true;
+
+	has_changes = mpam_update_config(&old, &new);
+	KUNIT_EXPECT_TRUE(test, has_changes);
+
+	KUNIT_EXPECT_EQ(test, old.cmax, 0x7f00);
+	KUNIT_EXPECT_EQ(test, old.cmin, 0x3f00);
+	KUNIT_EXPECT_EQ(test, old.intpri, 3);
+	KUNIT_EXPECT_EQ(test, old.mbw_min, 0x7f00);
+	KUNIT_EXPECT_EQ(test, old.mbw_max, 0xff00);
+	KUNIT_EXPECT_TRUE(test, old.max_limit);
+
+	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_cmax_cmax, &old));
+	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_cmax_cmin, &old));
+	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_intpri_part, &old));
+	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_min, &old));
+	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_mbw_max, &old));
+	KUNIT_EXPECT_TRUE(test, mpam_has_feature(mpam_feat_max_limit, &old));
+
+	/* Applying the same config again is a no-op: */
+	has_changes = mpam_update_config(&old, &new);
+	KUNIT_EXPECT_FALSE(test, has_changes);
+
+	/* Clearing the hard limit on its own is still a change: */
+	new.max_limit = false;
+	has_changes = mpam_update_config(&old, &new);
+	KUNIT_EXPECT_TRUE(test, has_changes);
+	KUNIT_EXPECT_FALSE(test, old.max_limit);
+}
+
+/*
+ * Register-level checks for the PRI/MIN/MAX/HDL controls: drive
+ * mpam_reprogram_ris_partid() against a fake MMIO page and read back the
+ * partition-selection registers it programmed.
+ */
+static struct mpam_msc_ris *test_setup_reprogram_ris(struct kunit *test,
+						     char __iomem **bufp)
+{
+	char __iomem *buf = (__force char __iomem *)kunit_kzalloc(test, SZ_16K,
+								  GFP_KERNEL);
+
+	if (!buf)
+		return NULL;
+
+	reset_fake_hierarchy();
+
+	fake_ris1.vmsc = &fake_vmsc1;
+	fake_vmsc1.msc = &fake_msc1;
+
+	fake_msc1.mapped_hwpage = buf;
+	fake_msc1.mapped_hwpage_sz = SZ_16K;
+	cpumask_copy(&fake_msc1.accessibility, cpu_possible_mask);
+	mutex_init(&fake_msc1.part_sel_lock);
+
+	*bufp = buf;
+	return &fake_ris1;
+}
+
+static inline u32 test_reg_read(char __iomem *buf, u16 reg)
+{
+	return readl_relaxed(buf + reg);
+}
+
+static void test_mpam_reprogram_fraction_regs(struct kunit *test)
+{
+	struct mpam_config cfg = { };
+	struct mpam_props *props;
+	char __iomem *buf;
+	struct mpam_msc_ris *ris;
+
+	ris = test_setup_reprogram_ris(test, &buf);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ris);
+	props = &ris->props;
+
+	mpam_set_feature(mpam_feat_mbw_min, props);
+	mpam_set_feature(mpam_feat_mbw_max, props);
+	props->bwa_wd = 8;
+
+	guard(preempt)();
+
+	/* Reset: MBW_MIN is 0, MBW_MAX is 'no limit' without HARDLIM */
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_MBW_MIN), 0);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_MBW_MAX),
+			MPAMCFG_MBW_MAX_MAX);
+
+	/* The partid being configured is selected first */
+	KUNIT_EXPECT_EQ(test,
+			FIELD_GET(MPAMCFG_PART_SEL_PARTID_SEL,
+				  test_reg_read(buf, MPAMCFG_PART_SEL)), 5);
+
+	/* MBW_MIN configured, MBW_MAX stays at 'no limit' */
+	mpam_set_feature(mpam_feat_mbw_min, &cfg);
+	cfg.mbw_min = 0x7f00;
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_MBW_MIN), 0x7f00);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_MBW_MAX),
+			MPAMCFG_MBW_MAX_MAX);
+
+	/* MBW_MAX configured, no hard limit */
+	memset(&cfg, 0, sizeof(cfg));
+	mpam_set_feature(mpam_feat_mbw_max, &cfg);
+	cfg.mbw_max = 0x7f00;
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_MBW_MAX), 0x7f00);
+
+	/*
+	 * The hard limit follows its own feature bit: MBHDL can be
+	 * configured without MBW_MAX ever being written, the bandwidth
+	 * limit itself stays at 'no limit'.
+	 */
+	memset(&cfg, 0, sizeof(cfg));
+	mpam_set_feature(mpam_feat_max_limit, &cfg);
+	cfg.max_limit = true;
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_MBW_MAX),
+			MPAMCFG_MBW_MAX_MAX | MPAMCFG_MBW_MAX_HARDLIM);
+
+	/* Both the fraction and the hard limit */
+	memset(&cfg, 0, sizeof(cfg));
+	mpam_set_feature(mpam_feat_mbw_max, &cfg);
+	cfg.mbw_max = 0x7f00;
+	mpam_set_feature(mpam_feat_max_limit, &cfg);
+	cfg.max_limit = true;
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_MBW_MAX),
+			0x7f00 | MPAMCFG_MBW_MAX_HARDLIM);
+
+	/* Clearing the hard limit bit is a write of its own */
+	cfg.max_limit = false;
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_MBW_MAX), 0x7f00);
+}
+
+static void test_mpam_reprogram_cmax_cmin_regs(struct kunit *test)
+{
+	struct mpam_config cfg = { };
+	struct mpam_props *props;
+	char __iomem *buf;
+	struct mpam_msc_ris *ris;
+
+	ris = test_setup_reprogram_ris(test, &buf);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ris);
+	props = &ris->props;
+
+	mpam_set_feature(mpam_feat_cmax_cmax, props);
+	mpam_set_feature(mpam_feat_cmax_cmin, props);
+	props->cmax_wd = 8;
+
+	guard(preempt)();
+
+	/* Reset: CMAX is 'all capacity', CMIN is 0 */
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_CMAX),
+			MPAMCFG_CMAX_CMAX);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_CMIN), 0);
+
+	/* Configured values are written verbatim */
+	mpam_set_feature(mpam_feat_cmax_cmax, &cfg);
+	cfg.cmax = 0x7f00;
+	mpam_set_feature(mpam_feat_cmax_cmin, &cfg);
+	cfg.cmin = 0x3f00;
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_CMAX), 0x7f00);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_CMIN), 0x3f00);
+
+	/*
+	 * Every implemented register is reprogrammed on each call: a cfg
+	 * that only carries cmax writes 0 (0% capacity) to CMAX and resets
+	 * CMIN, whose feature is absent, to 0.
+	 */
+	memset(&cfg, 0, sizeof(cfg));
+	mpam_set_feature(mpam_feat_cmax_cmax, &cfg);
+	cfg.cmax = 0;
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_CMAX), 0);
+	KUNIT_EXPECT_EQ(test, test_reg_read(buf, MPAMCFG_CMIN), 0);
+}
+
+static void test_mpam_reprogram_intpri_reg(struct kunit *test)
+{
+	struct mpam_config cfg = { };
+	struct mpam_props *props;
+	char __iomem *buf;
+	struct mpam_msc_ris *ris;
+
+	ris = test_setup_reprogram_ris(test, &buf);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ris);
+	props = &ris->props;
+
+	mpam_set_feature(mpam_feat_intpri_part, props);
+	mpam_set_feature(mpam_feat_intpri_part_0_low, props);
+	props->intpri_wd = 2;
+
+	guard(preempt)();
+
+	/* Reset default for 0-is-low polarity is the lowest priority */
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test,
+			FIELD_GET(MPAMCFG_PRI_INTPRI,
+				  test_reg_read(buf, MPAMCFG_PRI)), 3);
+
+	/* Writing 0 must program 0, not the reset default */
+	mpam_set_feature(mpam_feat_intpri_part, &cfg);
+	cfg.intpri = 0;
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test,
+			FIELD_GET(MPAMCFG_PRI_INTPRI,
+				  test_reg_read(buf, MPAMCFG_PRI)), 0);
+
+	/* Highest priority of a 2-bit field */
+	cfg.intpri = 3;
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test,
+			FIELD_GET(MPAMCFG_PRI_INTPRI,
+				  test_reg_read(buf, MPAMCFG_PRI)), 3);
+
+	/*
+	 * Without the 0-is-low property the reset default of an aces-high
+	 * implementation is the highest priority: 0.
+	 */
+	mpam_clear_feature(mpam_feat_intpri_part_0_low, props);
+	memset(&cfg, 0, sizeof(cfg));
+	mpam_reprogram_ris_partid(ris, 5, &cfg);
+	KUNIT_EXPECT_EQ(test,
+			FIELD_GET(MPAMCFG_PRI_INTPRI,
+				  test_reg_read(buf, MPAMCFG_PRI)), 0);
+}
+
 static struct kunit_case mpam_devices_test_cases[] = {
+	KUNIT_CASE(test_mpam_update_config_values),
+	KUNIT_CASE(test_mpam_reprogram_fraction_regs),
+	KUNIT_CASE(test_mpam_reprogram_cmax_cmin_regs),
+	KUNIT_CASE(test_mpam_reprogram_intpri_reg),
 	KUNIT_CASE(test_mpam_reset_msc_bitmap),
 	KUNIT_CASE(test_mpam_enable_merge_features),
 	KUNIT_CASE(test__props_mismatch),

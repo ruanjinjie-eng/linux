@@ -752,6 +752,537 @@ static void test_narrowing_full_range_mapping(struct kunit *test)
 	resctrl_using_extra_partids = saved_narrowing;
 }
 
+/*
+ * Test cases for the PRI/MIN/MAX/HDL pseudo resources
+ */
+
+/*
+ * The CMAX/CMIN fractions use the same fixed-point format and conversion
+ * as MBW_MAX, with cmax_wd bits instead of bwa_wd. Check the conversion
+ * pair restores the original value for every architectural width:
+ */
+static void test_percent_ca_max_roundtrip_stability(struct kunit *test)
+{
+	struct mpam_props fake_props = { };
+	unsigned int shift;
+	u32 pc, ca, pc2, ca2;
+
+	mpam_set_feature(mpam_feat_cmax_cmax, &fake_props);
+	fake_props.cmax_wd = test_get_bwa_wd(test);
+	shift = 16 - fake_props.cmax_wd;
+
+	/*
+	 * Converting a valid value from the coarser scale to the finer
+	 * scale and back again must yield the original value:
+	 */
+	if (fake_props.cmax_wd >= 7) {
+		/* More than 100 steps: only test exact pc values: */
+		for (pc = ca_max_to_percent(0, &fake_props); pc <= MAX_MBA_BW; pc++) {
+			ca = percent_to_ca_max(pc, &fake_props);
+			pc2 = ca_max_to_percent(ca, &fake_props);
+			KUNIT_EXPECT_EQ(test, pc2, pc);
+		}
+	} else {
+		/* Fewer than 100 steps: only test exact ca_max values: */
+		for (ca = 0; ca < 1 << 16; ca += 1 << shift) {
+			pc = ca_max_to_percent(ca, &fake_props);
+			ca2 = percent_to_ca_max(pc, &fake_props);
+			KUNIT_EXPECT_EQ(test, ca2, ca);
+		}
+	}
+}
+
+static void test_ca_max_exact_values(struct kunit *test)
+{
+	struct mpam_props fake_props = { };
+
+	mpam_set_feature(mpam_feat_cmax_cmax, &fake_props);
+	fake_props.cmax_wd = 8;
+
+	KUNIT_EXPECT_EQ(test, percent_to_ca_max(0, &fake_props), 0);
+	KUNIT_EXPECT_EQ(test, percent_to_ca_max(50, &fake_props), 0x7f00);
+	KUNIT_EXPECT_EQ(test, percent_to_ca_max(100, &fake_props), 0xff00);
+
+	KUNIT_EXPECT_EQ(test, ca_max_to_percent(0, &fake_props), 0);
+	KUNIT_EXPECT_EQ(test, ca_max_to_percent(0x7f00, &fake_props), 50);
+	KUNIT_EXPECT_EQ(test, ca_max_to_percent(0xff00, &fake_props), MAX_MBA_BW);
+}
+
+struct pseudo_res_case {
+	enum resctrl_res_level	rid;
+	const char		*name;
+	u32			min_bw;
+	u32			max_bw;
+	enum resctrl_scope	ctrl_scope;
+};
+
+/* intpri_wd = 2 and bwa_wd = 4 in the fake props for this table */
+static const struct pseudo_res_case pseudo_res_cases[] = {
+	{ RDT_RESOURCE_L3_MAX, "L3MAX", 1, 100, RESCTRL_L3_CACHE },
+	{ RDT_RESOURCE_L2_MAX, "L2MAX", 1, 100, RESCTRL_L2_CACHE },
+	{ RDT_RESOURCE_L3_MIN, "L3MIN", 0, 100, RESCTRL_L3_CACHE },
+	{ RDT_RESOURCE_L2_MIN, "L2MIN", 0, 100, RESCTRL_L2_CACHE },
+	{ RDT_RESOURCE_MB_MIN, "MBMIN", 0, 100, RESCTRL_L3_CACHE },
+	{ RDT_RESOURCE_L3_PRI, "L3PRI", 0,   3, RESCTRL_L3_CACHE },
+	{ RDT_RESOURCE_L2_PRI, "L2PRI", 0,   3, RESCTRL_L2_CACHE },
+	{ RDT_RESOURCE_MB_PRI, "MBPRI", 0,   3, RESCTRL_L3_CACHE },
+	{ RDT_RESOURCE_MB_HDL, "MBHDL", 0,   1, RESCTRL_L3_CACHE },
+	{ RDT_RESOURCE_MB_OPT, "MBOPT", 1,  15, RESCTRL_L3_CACHE },
+};
+
+static void pseudo_res_desc(const struct pseudo_res_case *param, char *desc)
+{
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%s\n", param->name);
+}
+
+KUNIT_ARRAY_PARAM(pseudo_res, pseudo_res_cases, pseudo_res_desc);
+
+static void test_pseudo_control_init(struct kunit *test)
+{
+	const struct pseudo_res_case *param = test->param_value;
+	struct mpam_class fake_class = { };
+	struct mpam_resctrl_res *res = &mpam_resctrl_controls[param->rid];
+	struct mpam_class *saved_class = res->class;
+	struct rdt_resource saved_r = res->resctrl_res;
+	int ret;
+
+	fake_class.props.cmax_wd = 8;
+	fake_class.props.intpri_wd = 2;
+	fake_class.props.bwa_wd = 4;
+
+	res->class = &fake_class;
+	memset(&res->resctrl_res, 0, sizeof(res->resctrl_res));
+	res->resctrl_res.rid = param->rid;
+
+	ret = mpam_resctrl_control_init(res);
+
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_STREQ(test, res->resctrl_res.name, param->name);
+	KUNIT_EXPECT_TRUE(test, res->resctrl_res.alloc_capable);
+	KUNIT_EXPECT_FALSE(test, res->resctrl_res.mon_capable);
+	KUNIT_EXPECT_FALSE(test, res->resctrl_res.cdp_capable);
+	KUNIT_EXPECT_EQ(test, res->resctrl_res.schema_fmt, RESCTRL_SCHEMA_RANGE);
+	KUNIT_EXPECT_EQ(test, res->resctrl_res.ctrl_scope, param->ctrl_scope);
+	KUNIT_EXPECT_EQ(test, res->resctrl_res.membw.min_bw, param->min_bw);
+	KUNIT_EXPECT_EQ(test, res->resctrl_res.membw.max_bw, param->max_bw);
+	KUNIT_EXPECT_EQ(test, res->resctrl_res.membw.bw_gran, 1);
+	KUNIT_EXPECT_TRUE(test, res->resctrl_res.membw.delay_linear);
+
+	res->resctrl_res = saved_r;
+	res->class = saved_class;
+}
+
+struct pseudo_default_case {
+	enum resctrl_res_level	rid;
+	u32			max_bw;		/* membw.max_bw to install */
+	u32			expected;
+};
+
+static const struct pseudo_default_case pseudo_default_cases[] = {
+	{ RDT_RESOURCE_L3_MAX, 100, 100 },
+	{ RDT_RESOURCE_L2_MAX, 100, 100 },
+	{ RDT_RESOURCE_L3_MIN, 100,   0 },
+	{ RDT_RESOURCE_L2_MIN, 100,   0 },
+	{ RDT_RESOURCE_MB_MIN, 100,   0 },
+	{ RDT_RESOURCE_L3_PRI,   3,   0 },
+	{ RDT_RESOURCE_L2_PRI,   3,   0 },
+	{ RDT_RESOURCE_MB_PRI,   3,   3 },
+	{ RDT_RESOURCE_MB_HDL,   1,   1 },
+	{ RDT_RESOURCE_MB_OPT,  15,  15 },
+};
+
+static void pseudo_default_desc(const struct pseudo_default_case *param,
+				 char *desc)
+{
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "rid=%d\n", param->rid);
+}
+
+KUNIT_ARRAY_PARAM(pseudo_default, pseudo_default_cases, pseudo_default_desc);
+
+static void test_pseudo_default_ctrl(struct kunit *test)
+{
+	const struct pseudo_default_case *param = test->param_value;
+	struct rdt_resource r = { };
+
+	r.rid = param->rid;
+	r.schema_fmt = RESCTRL_SCHEMA_RANGE;
+	r.membw.max_bw = param->max_bw;
+
+	KUNIT_EXPECT_EQ(test, resctrl_get_default_ctrl(&r), param->expected);
+}
+
+/*
+ * Drive resctrl_arch_update_one() through mpam_apply_config() with a
+ * component that has no MSC attached, so only the config merge happens,
+ * then read the value back through resctrl_arch_get_config(). The fake
+ * props describe a class with every pseudo-resource capability, widths
+ * chosen so all the table values are exact.
+ */
+#define PSEUDO_TEST_NUM_CLOSID	16
+#define PSEUDO_TEST_PARTID	5
+
+struct pseudo_cfg_case {
+	enum resctrl_res_level	rid;
+	u32			cfg_val;	/* value written to schemata */
+	u16			expect_raw;	/* expected fraction/register value */
+	const char		*desc;
+};
+
+static const struct pseudo_cfg_case pseudo_cfg_cases[] = {
+	{ RDT_RESOURCE_L3_MAX,  50, 0x7f00, "L3MAX: 50%" },
+	{ RDT_RESOURCE_L2_MAX,  25, 0x3f00, "L2MAX: 25%" },
+	{ RDT_RESOURCE_L3_MIN,  25, 0x3f00, "L3MIN: 25%" },
+	{ RDT_RESOURCE_L2_MIN,  50, 0x7f00, "L2MIN: 50%" },
+	{ RDT_RESOURCE_MB_MIN,  50, 0x7f00, "MBMIN: 50%" },
+	{ RDT_RESOURCE_L3_PRI,   3,     3, "L3PRI: 3" },
+	{ RDT_RESOURCE_L2_PRI,   0,     0, "L2PRI: 0" },
+	{ RDT_RESOURCE_MB_PRI,   3,     3, "MBPRI: 3" },
+	{ RDT_RESOURCE_MB_HDL,   1,     1, "MBHDL: 1" },
+	{ RDT_RESOURCE_MB_OPT, 0xa5, 0xa500, "MBOPT: 0xa5" },
+};
+
+static void pseudo_cfg_desc(const struct pseudo_cfg_case *param, char *desc)
+{
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%s\n", param->desc);
+}
+
+KUNIT_ARRAY_PARAM(pseudo_cfg, pseudo_cfg_cases, pseudo_cfg_desc);
+
+/*
+ * mpam_srcu is only initialised by the platform driver, which never runs
+ * under KUnit - but the config-apply and class-pick paths take an srcu
+ * read lock.
+ */
+static bool test_pseudo_srcu_inited;
+
+static void test_mpam_srcu_init_once(struct kunit *test)
+{
+	if (!test_pseudo_srcu_inited) {
+		int err = init_srcu_struct(&mpam_srcu);
+
+		KUNIT_ASSERT_EQ(test, err, 0);
+		test_pseudo_srcu_inited = true;
+	}
+}
+
+static void test_pseudo_update_get_config(struct kunit *test)
+{
+	const struct pseudo_cfg_case *param = test->param_value;
+	struct mpam_config *cfg;
+	struct mpam_props fake_props = { };
+	struct mpam_class fake_class = { };
+	struct mpam_component fake_comp = { };
+	struct mpam_resctrl_dom fake_dom = { };
+	struct mpam_resctrl_res *res;
+	struct mpam_class *saved_class;
+	struct rdt_resource saved_r;
+	struct mpam_config *cfgs;
+	u32 saved_num_closid;
+	enum mpam_device_features feature;
+	u32 got;
+	int ret;
+
+	cfgs = kunit_kzalloc(test, sizeof(*cfgs) * PSEUDO_TEST_NUM_CLOSID,
+			     GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cfgs);
+
+	test_mpam_srcu_init_once(test);
+
+	mpam_set_feature(mpam_feat_cmax_cmax, &fake_props);
+	mpam_set_feature(mpam_feat_cmax_cmin, &fake_props);
+	mpam_set_feature(mpam_feat_intpri_part, &fake_props);
+	mpam_set_feature(mpam_feat_mbw_min, &fake_props);
+	mpam_set_feature(mpam_feat_mbw_max, &fake_props);
+	mpam_set_feature(mpam_feat_max_limit, &fake_props);
+	fake_props.cmax_wd = 8;
+	fake_props.bwa_wd = 8;
+	fake_props.intpri_wd = 2;
+
+	fake_class.props = fake_props;
+	INIT_LIST_HEAD(&fake_comp.vmsc);
+	fake_comp.cfg = cfgs;
+	fake_dom.ctrl_comp = &fake_comp;
+
+	res = &mpam_resctrl_controls[param->rid];
+	saved_class = res->class;
+	saved_r = res->resctrl_res;
+	saved_num_closid = resctrl_num_closid;
+
+	res->class = &fake_class;
+	res->resctrl_res.rid = param->rid;
+	res->resctrl_res.alloc_capable = true;
+	res->resctrl_res.schema_fmt = RESCTRL_SCHEMA_RANGE;
+	resctrl_num_closid = PSEUDO_TEST_NUM_CLOSID;
+
+	static_branch_enable(&mpam_enabled);
+
+	ret = resctrl_arch_update_one(&res->resctrl_res,
+				      &fake_dom.resctrl_ctrl_dom,
+				      PSEUDO_TEST_PARTID, CDP_NONE,
+				      param->cfg_val);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+
+	/* The value must have landed in the component config */
+	cfg = &cfgs[PSEUDO_TEST_PARTID];
+	switch (param->rid) {
+	case RDT_RESOURCE_L3_MAX:
+	case RDT_RESOURCE_L2_MAX:
+		feature = mpam_feat_cmax_cmax;
+		KUNIT_EXPECT_EQ(test, cfg->cmax, param->expect_raw);
+		break;
+	case RDT_RESOURCE_L3_MIN:
+	case RDT_RESOURCE_L2_MIN:
+		feature = mpam_feat_cmax_cmin;
+		KUNIT_EXPECT_EQ(test, cfg->cmin, param->expect_raw);
+		break;
+	case RDT_RESOURCE_L3_PRI:
+	case RDT_RESOURCE_L2_PRI:
+	case RDT_RESOURCE_MB_PRI:
+		feature = mpam_feat_intpri_part;
+		KUNIT_EXPECT_EQ(test, cfg->intpri, param->expect_raw);
+		break;
+	case RDT_RESOURCE_MB_MIN:
+		feature = mpam_feat_mbw_min;
+		KUNIT_EXPECT_EQ(test, cfg->mbw_min, param->expect_raw);
+		break;
+	case RDT_RESOURCE_MB_HDL:
+		feature = mpam_feat_max_limit;
+		KUNIT_EXPECT_TRUE(test, cfg->max_limit);
+		break;
+	case RDT_RESOURCE_MB_OPT:
+		feature = mpam_feat_mbw_max;
+		KUNIT_EXPECT_EQ(test, cfg->mbw_max, param->expect_raw);
+		break;
+	default:
+		KUNIT_FAIL(test, "unexpected rid");
+		return;
+	}
+	KUNIT_EXPECT_TRUE(test, mpam_has_feature(feature, cfg));
+
+	got = resctrl_arch_get_config(&res->resctrl_res,
+				      &fake_dom.resctrl_ctrl_dom,
+				      PSEUDO_TEST_PARTID, CDP_NONE);
+	KUNIT_EXPECT_EQ(test, got, param->cfg_val);
+
+	static_branch_disable(&mpam_enabled);
+	resctrl_num_closid = saved_num_closid;
+	res->resctrl_res = saved_r;
+	res->class = saved_class;
+}
+
+/*
+ * Pin which controls prevent the extra request PARTIDs being used as
+ * monitor groups: capacity and bandwidth fractions are additive, so the
+ * same value written to each PARTID of a control group does not preserve
+ * the group's allocation. Priority is a per-PARTID label, and the hard
+ * limit only exists alongside MBW_MAX, so neither is non-aliasing.
+ */
+static void test_props_non_aliasing_controls(struct kunit *test)
+{
+	static const enum mpam_device_features non_aliasing[] = {
+		mpam_feat_mbw_max, mpam_feat_mbw_min, mpam_feat_mbw_prop,
+		mpam_feat_cmax_cmax, mpam_feat_cmax_cmin, mpam_feat_cmax_cassoc,
+		mpam_feat_cmax_softlim,
+	};
+	static const enum mpam_device_features aliasing[] = {
+		mpam_feat_intpri_part, mpam_feat_dspri_part,
+		mpam_feat_max_limit,
+	};
+	struct mpam_props props = { };
+	int i;
+
+	KUNIT_EXPECT_FALSE(test, mpam_props_has_non_aliasing_controls(&props));
+
+	for (i = 0; i < ARRAY_SIZE(non_aliasing); i++) {
+		mpam_set_feature(non_aliasing[i], &props);
+		KUNIT_EXPECT_TRUE(test,
+				  mpam_props_has_non_aliasing_controls(&props));
+		mpam_clear_feature(non_aliasing[i], &props);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(aliasing); i++) {
+		mpam_set_feature(aliasing[i], &props);
+		KUNIT_EXPECT_FALSE(test,
+				   mpam_props_has_non_aliasing_controls(&props));
+		mpam_clear_feature(aliasing[i], &props);
+	}
+}
+
+/*
+ * The pseudo resources share the class picked for the cache resource:
+ * only the config field that gets written differs. Check the class
+ * assignment against the class' feature bits.
+ */
+static const enum resctrl_res_level cache_pick_rids[] = {
+	RDT_RESOURCE_L3, RDT_RESOURCE_L3_MAX, RDT_RESOURCE_L3_MIN,
+	RDT_RESOURCE_L3_PRI, RDT_RESOURCE_L2, RDT_RESOURCE_L2_MAX,
+	RDT_RESOURCE_L2_MIN, RDT_RESOURCE_L2_PRI,
+};
+
+struct pick_cache_case {
+	const char	*desc;
+	u8		level;
+	bool		cpor, cmax, cmin, intpri;
+	/* indexed by cache_pick_rids[] */
+	bool		expect[ARRAY_SIZE(cache_pick_rids)];
+};
+
+static const struct pick_cache_case pick_cache_cases[] = {
+	{ "L3 all features", 3, true, true, true, true,
+	  { true, true, true, true, false, false, false, false } },
+	{ "L3 cpor only", 3, true, false, false, false,
+	  { true, false, false, false, false, false, false, false } },
+	{ "L3 cmax without cpor", 3, false, true, true, true,
+	  { false, false, false, false, false, false, false, false } },
+	{ "L2 all features", 2, true, true, true, true,
+	  { false, false, false, false, true, true, true, true } },
+	{ "L2 cpor and intpri", 2, true, false, false, true,
+	  { false, false, false, false, true, false, false, true } },
+	{ "L1 cache ignored", 1, true, true, true, true,
+	  { false, false, false, false, false, false, false, false } },
+};
+
+static void pick_cache_desc(const struct pick_cache_case *param, char *desc)
+{
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%s\n", param->desc);
+}
+
+KUNIT_ARRAY_PARAM(pick_cache, pick_cache_cases, pick_cache_desc);
+
+static void test_pick_caches_pseudo_gating(struct kunit *test)
+{
+	const struct pick_cache_case *param = test->param_value;
+	struct mpam_resctrl_res saved[ARRAY_SIZE(cache_pick_rids)];
+	struct mpam_class fake_class = { };
+	int i;
+
+	test_mpam_srcu_init_once(test);
+
+	fake_class.type = MPAM_CLASS_CACHE;
+	fake_class.level = param->level;
+	INIT_LIST_HEAD_RCU(&fake_class.components);
+	cpumask_copy(&fake_class.affinity, cpu_possible_mask);
+	if (param->cpor) {
+		mpam_set_feature(mpam_feat_cpor_part, &fake_class.props);
+		fake_class.props.cpbm_wd = 16;
+	}
+	if (param->cmax)
+		mpam_set_feature(mpam_feat_cmax_cmax, &fake_class.props);
+	if (param->cmin)
+		mpam_set_feature(mpam_feat_cmax_cmin, &fake_class.props);
+	if (param->intpri) {
+		mpam_set_feature(mpam_feat_intpri_part, &fake_class.props);
+		fake_class.props.intpri_wd = 2;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(cache_pick_rids); i++) {
+		saved[i] = mpam_resctrl_controls[cache_pick_rids[i]];
+		memset(&mpam_resctrl_controls[cache_pick_rids[i]], 0,
+		       sizeof(saved[i]));
+	}
+
+	cpus_read_lock();
+	list_add_tail(&fake_class.classes_list, &mpam_classes);
+	mpam_resctrl_pick_caches();
+	list_del(&fake_class.classes_list);
+	cpus_read_unlock();
+
+	for (i = 0; i < ARRAY_SIZE(cache_pick_rids); i++) {
+		struct mpam_class *got =
+			mpam_resctrl_controls[cache_pick_rids[i]].class;
+
+		if (param->expect[i])
+			KUNIT_EXPECT_PTR_EQ(test, got, &fake_class);
+		else
+			KUNIT_EXPECT_NULL(test, got);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(cache_pick_rids); i++)
+		mpam_resctrl_controls[cache_pick_rids[i]] = saved[i];
+}
+
+/* Same idea for the memory-side pseudo resources, behind the MBA class */
+static const enum resctrl_res_level mba_pick_rids[] = {
+	RDT_RESOURCE_MBA, RDT_RESOURCE_MB_MIN, RDT_RESOURCE_MB_PRI,
+	RDT_RESOURCE_MB_HDL,
+};
+
+struct pick_mba_case {
+	const char	*desc;
+	bool		mbw_max, mbw_min, intpri, max_limit;
+	/* indexed by mba_pick_rids[] */
+	bool		expect[ARRAY_SIZE(mba_pick_rids)];
+};
+
+static const struct pick_mba_case pick_mba_cases[] = {
+	{ "all bandwidth controls", true, true, true, true,
+	  { true, true, true, true } },
+	{ "mbw_max only", true, false, false, false,
+	  { true, false, false, false } },
+	{ "no usable bandwidth control", false, true, true, true,
+	  { false, false, false, false } },
+};
+
+static void pick_mba_desc(const struct pick_mba_case *param, char *desc)
+{
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%s\n", param->desc);
+}
+
+KUNIT_ARRAY_PARAM(pick_mba, pick_mba_cases, pick_mba_desc);
+
+static void test_pick_mba_pseudo_gating(struct kunit *test)
+{
+	const struct pick_mba_case *param = test->param_value;
+	struct mpam_resctrl_res saved[ARRAY_SIZE(mba_pick_rids)];
+	struct mpam_class fake_class = { };
+	int i;
+
+	test_mpam_srcu_init_once(test);
+
+	/* A cache class at level 3 matches the L3 topology trivially */
+	fake_class.type = MPAM_CLASS_CACHE;
+	fake_class.level = 3;
+	INIT_LIST_HEAD_RCU(&fake_class.components);
+	cpumask_copy(&fake_class.affinity, cpu_possible_mask);
+	if (param->mbw_max) {
+		mpam_set_feature(mpam_feat_mbw_max, &fake_class.props);
+		fake_class.props.bwa_wd = 8;
+	}
+	if (param->mbw_min)
+		mpam_set_feature(mpam_feat_mbw_min, &fake_class.props);
+	if (param->intpri) {
+		mpam_set_feature(mpam_feat_intpri_part, &fake_class.props);
+		fake_class.props.intpri_wd = 2;
+	}
+	if (param->max_limit)
+		mpam_set_feature(mpam_feat_max_limit, &fake_class.props);
+
+	for (i = 0; i < ARRAY_SIZE(mba_pick_rids); i++) {
+		saved[i] = mpam_resctrl_controls[mba_pick_rids[i]];
+		memset(&mpam_resctrl_controls[mba_pick_rids[i]], 0,
+		       sizeof(saved[i]));
+	}
+
+	cpus_read_lock();
+	list_add_tail(&fake_class.classes_list, &mpam_classes);
+	mpam_resctrl_pick_mba();
+	list_del(&fake_class.classes_list);
+	cpus_read_unlock();
+
+	for (i = 0; i < ARRAY_SIZE(mba_pick_rids); i++) {
+		struct mpam_class *got =
+			mpam_resctrl_controls[mba_pick_rids[i]].class;
+
+		if (param->expect[i])
+			KUNIT_EXPECT_PTR_EQ(test, got, &fake_class);
+		else
+			KUNIT_EXPECT_NULL(test, got);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(mba_pick_rids); i++)
+		mpam_resctrl_controls[mba_pick_rids[i]] = saved[i];
+}
+
 static struct kunit_case mpam_resctrl_test_cases[] = {
 	KUNIT_CASE(test_get_mba_granularity),
 	KUNIT_CASE_PARAM(test_mbw_max_to_percent, test_percent_value_gen_params),
@@ -770,6 +1301,15 @@ static struct kunit_case mpam_resctrl_test_cases[] = {
 			 partid_in_closid_gen_params),
 	KUNIT_CASE(test_narrowing_boundary_conditions),
 	KUNIT_CASE(test_narrowing_full_range_mapping),
+	KUNIT_CASE_PARAM(test_percent_ca_max_roundtrip_stability,
+			 test_all_bwa_wd_gen_params),
+	KUNIT_CASE(test_ca_max_exact_values),
+	KUNIT_CASE(test_props_non_aliasing_controls),
+	KUNIT_CASE_PARAM(test_pick_caches_pseudo_gating, pick_cache_gen_params),
+	KUNIT_CASE_PARAM(test_pick_mba_pseudo_gating, pick_mba_gen_params),
+	KUNIT_CASE_PARAM(test_pseudo_control_init, pseudo_res_gen_params),
+	KUNIT_CASE_PARAM(test_pseudo_default_ctrl, pseudo_default_gen_params),
+	KUNIT_CASE_PARAM(test_pseudo_update_get_config, pseudo_cfg_gen_params),
 	{}
 };
 
