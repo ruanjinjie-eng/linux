@@ -296,6 +296,462 @@ static void test_percent_to_max_rounding(struct kunit *test)
 	KUNIT_EXPECT_LE(test, 4 * num_rounded_up, 3 * total);
 }
 
+/*
+ * Test cases for CDP and PARTID narrowing compatibility
+ */
+
+struct cdp_narrowing_test_case {
+	bool cdp_enabled;
+	bool narrowing_enabled;
+	u32 closid;
+	u32 rmid;
+	u8 pmg_max;
+	u32 expected_partid_d;
+	u32 expected_partid_i;
+	u8 expected_pmg_d;
+	u8 expected_pmg_i;
+	const char *desc;
+};
+
+static const struct cdp_narrowing_test_case cdp_narrowing_cases[] = {
+	{
+		.cdp_enabled = false,
+		.narrowing_enabled = false,
+		.closid = 5,
+		.rmid = 3,
+		.pmg_max = 127,
+		.expected_partid_d = 5,
+		.expected_partid_i = 5,
+		.expected_pmg_d = 3,
+		.expected_pmg_i = 3,
+		.desc = "CDP=0, narrow=0: basic mapping"
+	},
+	{
+		.cdp_enabled = false,
+		.narrowing_enabled = true,
+		.closid = 5,
+		.rmid = 258,
+		.pmg_max = 127,
+		.expected_partid_d = 2,
+		.expected_partid_i = 2,
+		.expected_pmg_d = 2,
+		.expected_pmg_i = 2,
+		.desc = "CDP=0, narrow=1: extract reqPARTID from rmid"
+	},
+	{
+		.cdp_enabled = true,
+		.narrowing_enabled = false,
+		.closid = 5,
+		.rmid = 3,
+		.pmg_max = 127,
+		.expected_partid_d = 10,
+		.expected_partid_i = 11,
+		.expected_pmg_d = 3,
+		.expected_pmg_i = 3,
+		.desc = "CDP=1, narrow=0: CDP DATA/CODE split"
+	},
+	{
+		.cdp_enabled = true,
+		.narrowing_enabled = true,
+		.closid = 5,
+		.rmid = 258,
+		.pmg_max = 127,
+		.expected_partid_d = 4,
+		.expected_partid_i = 5,
+		.expected_pmg_d = 2,
+		.expected_pmg_i = 2,
+		.desc = "CDP=1, narrow=1: both features combined"
+	},
+	{
+		.cdp_enabled = false,
+		.narrowing_enabled = false,
+		.closid = 65535,
+		.rmid = 0,
+		.pmg_max = 127,
+		.expected_partid_d = 65535,
+		.expected_partid_i = 65535,
+		.expected_pmg_d = 0,
+		.expected_pmg_i = 0,
+		.desc = "Boundary: max closid"
+	},
+	{
+		.cdp_enabled = false,
+		.narrowing_enabled = false,
+		.closid = 0,
+		.rmid = 127,
+		.pmg_max = 127,
+		.expected_partid_d = 0,
+		.expected_partid_i = 0,
+		.expected_pmg_d = 127,
+		.expected_pmg_i = 127,
+		.desc = "Boundary: max pmg"
+	},
+	{
+		.cdp_enabled = false,
+		.narrowing_enabled = true,
+		.closid = 0,
+		.rmid = 639,
+		.pmg_max = 159,
+		.expected_partid_d = 3,
+		.expected_partid_i = 3,
+		.expected_pmg_d = 159,
+		.expected_pmg_i = 159,
+		.desc = "Narrowing with pmg_max=159"
+	},
+	{
+		.cdp_enabled = true,
+		.narrowing_enabled = true,
+		.closid = 10,
+		.rmid = 1280,
+		.pmg_max = 127,
+		.expected_partid_d = 20,
+		.expected_partid_i = 21,
+		.expected_pmg_d = 0,
+		.expected_pmg_i = 0,
+		.desc = "CDP + narrowing with reqPARTID=10"
+	},
+};
+
+static void cdp_narrowing_test_desc(const struct cdp_narrowing_test_case *param,
+				    char *desc)
+{
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%s", param->desc);
+}
+
+KUNIT_ARRAY_PARAM(cdp_narrowing, cdp_narrowing_cases, cdp_narrowing_test_desc);
+
+static void test_cdp_narrowing_mapping(struct kunit *test)
+{
+	const struct cdp_narrowing_test_case *param = test->param_value;
+	bool saved_cdp, saved_narrowing;
+	u32 partid_d, partid_i;
+	u8 saved_pmg_max;
+	u8 pmg_d, pmg_i;
+
+	saved_pmg_max = mpam_pmg_max;
+	saved_cdp = cdp_enabled;
+	saved_narrowing = resctrl_using_extra_partids;
+
+	mpam_pmg_max = param->pmg_max;
+	cdp_enabled = param->cdp_enabled;
+	resctrl_using_extra_partids = param->narrowing_enabled;
+
+	resctrl_closid_rmid_to_partid_pmg(param->closid, param->rmid,
+					  &partid_d, &partid_i,
+					  &pmg_d, &pmg_i);
+
+	KUNIT_EXPECT_EQ(test, partid_d, param->expected_partid_d);
+	KUNIT_EXPECT_EQ(test, partid_i, param->expected_partid_i);
+	KUNIT_EXPECT_EQ(test, pmg_d, param->expected_pmg_d);
+	KUNIT_EXPECT_EQ(test, pmg_i, param->expected_pmg_i);
+
+	mpam_pmg_max = saved_pmg_max;
+	cdp_enabled = saved_cdp;
+	resctrl_using_extra_partids = saved_narrowing;
+}
+
+static void test_cdp_narrowing_consistency(struct kunit *test)
+{
+	u32 partid_d1, partid_i1, partid_d2, partid_i2;
+	u8 pmg_d1, pmg_i1, pmg_d2, pmg_i2;
+	bool saved_cdp, saved_narrowing;
+	u8 saved_pmg_max;
+
+	saved_pmg_max = mpam_pmg_max;
+	saved_cdp = cdp_enabled;
+	saved_narrowing = resctrl_using_extra_partids;
+
+	mpam_pmg_max = 127;
+
+	cdp_enabled = true;
+	resctrl_using_extra_partids = false;
+	resctrl_closid_rmid_to_partid_pmg(10, 5, &partid_d1, &partid_i1,
+					  &pmg_d1, &pmg_i1);
+
+	cdp_enabled = true;
+	resctrl_using_extra_partids = false;
+	resctrl_closid_rmid_to_partid_pmg(10, 7, &partid_d2, &partid_i2,
+					  &pmg_d2, &pmg_i2);
+
+	KUNIT_EXPECT_EQ(test, partid_d1, partid_d2);
+	KUNIT_EXPECT_EQ(test, partid_i1, partid_i2);
+	KUNIT_EXPECT_EQ(test, partid_i1, partid_d1 + 1);
+
+	mpam_pmg_max = saved_pmg_max;
+	cdp_enabled = saved_cdp;
+	resctrl_using_extra_partids = saved_narrowing;
+}
+
+static void test_narrowing_rmid_encode_decode(struct kunit *test)
+{
+	bool saved_narrowing;
+	u8 pmg, decoded_pmg;
+	u8 saved_pmg_max;
+	u16 partid;
+	u32 rmid;
+
+	saved_pmg_max = mpam_pmg_max;
+	saved_narrowing = resctrl_using_extra_partids;
+
+	mpam_pmg_max = 127;
+	resctrl_using_extra_partids = true;
+
+	for (partid = 0; partid < 100; partid++) {
+		for (pmg = 0; pmg <= mpam_pmg_max; pmg += 10) {
+			rmid = partid * (mpam_pmg_max + 1) + pmg;
+
+			KUNIT_EXPECT_EQ(test, resctrl_rmid_to_partid(rmid), partid);
+			decoded_pmg = resctrl_rmid_to_pmg(rmid);
+			KUNIT_EXPECT_EQ(test, decoded_pmg, pmg);
+		}
+	}
+
+	mpam_pmg_max = saved_pmg_max;
+	resctrl_using_extra_partids = saved_narrowing;
+}
+
+static void test_narrowing_rmid_idx_encode(struct kunit *test)
+{
+	u32 closid, rmid, idx;
+	bool saved_narrowing;
+	u8 saved_pmg_max;
+
+	saved_pmg_max = mpam_pmg_max;
+	saved_narrowing = resctrl_using_extra_partids;
+
+	mpam_pmg_max = 127;
+
+	resctrl_using_extra_partids = false;
+	for (closid = 0; closid < 10; closid++) {
+		for (rmid = 0; rmid < 10; rmid++) {
+			idx = resctrl_arch_rmid_idx_encode(closid, rmid);
+			KUNIT_EXPECT_EQ(test, idx, closid * 128 + rmid);
+		}
+	}
+
+	resctrl_using_extra_partids = true;
+	for (closid = 0; closid < 10; closid++) {
+		for (rmid = 0; rmid < 1000; rmid += 100) {
+			idx = resctrl_arch_rmid_idx_encode(closid, rmid);
+			KUNIT_EXPECT_EQ(test, idx, rmid);
+		}
+	}
+
+	mpam_pmg_max = saved_pmg_max;
+	resctrl_using_extra_partids = saved_narrowing;
+}
+
+static void test_narrowing_rmid_idx_decode(struct kunit *test)
+{
+	u32 decoded_closid, decoded_rmid;
+	u32 idx, closid, rmid;
+	bool saved_narrowing;
+	u8 saved_pmg_max;
+
+	saved_pmg_max = mpam_pmg_max;
+	saved_narrowing = resctrl_using_extra_partids;
+
+	mpam_pmg_max = 127;
+
+	resctrl_using_extra_partids = false;
+	for (closid = 0; closid < 10; closid++) {
+		for (rmid = 0; rmid < 10; rmid++) {
+			idx = closid * 128 + rmid;
+			resctrl_arch_rmid_idx_decode(idx, &decoded_closid, &decoded_rmid);
+			KUNIT_EXPECT_EQ(test, decoded_closid, closid);
+			KUNIT_EXPECT_EQ(test, decoded_rmid, rmid);
+		}
+	}
+
+	resctrl_using_extra_partids = true;
+	mpam_partid_map_init(64, 32);
+	for (idx = 0; idx < 5000; idx += 500) {
+		u16 partid = resctrl_rmid_to_partid(idx);
+		u16 intpartid = mpam_partid_to_intpartid(partid);
+
+		resctrl_arch_rmid_idx_decode(idx, &decoded_closid, &decoded_rmid);
+		KUNIT_EXPECT_EQ(test, decoded_closid, intpartid);
+		KUNIT_EXPECT_EQ(test, decoded_rmid, idx);
+	}
+	mpam_partid_map_init(0, 0);
+
+	mpam_pmg_max = saved_pmg_max;
+	resctrl_using_extra_partids = saved_narrowing;
+}
+
+struct partid_mapping_case {
+	u16 partid;
+	u16 num_partid;
+	u16 num_closid;
+	u16 expected_intpartid;
+	const char *desc;
+};
+
+static const struct partid_mapping_case partid_mapping_cases[] = {
+	{ 0, 128, 32, 0, "First PARTID maps to first intPARTID" },
+	{ 31, 128, 32, 31, "Last intPARTID maps 1:1" },
+	{ 32, 128, 32, 0, "First extra PARTID wraps to intPARTID 0" },
+	{ 33, 128, 32, 1, "Second extra PARTID wraps to intPARTID 1" },
+	{ 63, 128, 32, 31, "PARTID 63 wraps to intPARTID 31" },
+	{ 64, 128, 32, 0, "PARTID 64 wraps to intPARTID 0" },
+	{ 127, 128, 32, 31, "Max PARTID wraps to intPARTID 31" },
+	{ 15, 64, 16, 15, "Small config: PARTID 15 → intPARTID 15" },
+	{ 16, 64, 16, 0, "Small config: PARTID 16 wraps to 0" },
+	{ 63, 64, 16, 15, "Small config: max PARTID wraps to 15" },
+};
+
+static void partid_mapping_desc(const struct partid_mapping_case *param,
+				char *desc)
+{
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%s", param->desc);
+}
+
+KUNIT_ARRAY_PARAM(partid_mapping, partid_mapping_cases, partid_mapping_desc);
+
+static void test_narrowing_partid_mapping(struct kunit *test)
+{
+	const struct partid_mapping_case *param = test->param_value;
+	u16 result;
+
+	mpam_partid_map_init(param->num_partid, param->num_closid);
+
+	result = mpam_partid_to_intpartid(param->partid);
+	KUNIT_EXPECT_EQ(test, result, param->expected_intpartid);
+
+	mpam_partid_map_init(0, 0);
+}
+
+struct partid_in_closid_case {
+	u16 partid;
+	u32 closid;
+	bool cdp_enabled;
+	bool narrowing_enabled;
+	u16 num_closid;
+	bool expected;
+	const char *desc;
+};
+
+static const struct partid_in_closid_case partid_in_closid_cases[] = {
+	{ 10, 10, false, false, 32, true, "Legacy: exact match" },
+	{ 10, 11, false, false, 32, false, "Legacy: no match" },
+	{ 20, 10, true, false, 32, true, "CDP: even PARTID for closid 10" },
+	{ 21, 10, true, false, 32, true, "CDP: odd PARTID for closid 10" },
+	{ 22, 10, true, false, 32, false, "CDP: PARTID 22 not in closid 10" },
+	{ 10, 10, false, true, 32, true, "Narrowing: PARTID 10 -> intPARTID 10" },
+	{ 42, 10, false, true, 32, true, "Narrowing: PARTID 42 wraps to intPARTID 10" },
+	{ 74, 10, false, true, 32, true, "Narrowing: PARTID 74 wraps to intPARTID 10" },
+	{ 43, 10, false, true, 32, false, "Narrowing: PARTID 43 -> intPARTID 11" },
+	{ 20, 10, true, true, 32, true, "CDP+narrow: even PARTID 20 -> intPARTID 10" },
+	{ 21, 10, true, true, 32, true, "CDP+narrow: odd PARTID 21 -> intPARTID 10" },
+	{ 84, 10, true, true, 32, true, "CDP+narrow: PARTID 84 wraps to intPARTID 10" },
+	{ 86, 10, true, true, 32, false, "CDP+narrow: PARTID 86 -> intPARTID 11" },
+};
+
+static void partid_in_closid_desc(const struct partid_in_closid_case *param,
+				  char *desc)
+{
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%s", param->desc);
+}
+
+KUNIT_ARRAY_PARAM(partid_in_closid, partid_in_closid_cases,
+		  partid_in_closid_desc);
+
+static void test_narrowing_partid_in_closid(struct kunit *test)
+{
+	const struct partid_in_closid_case *param = test->param_value;
+	bool saved_cdp, saved_narrowing;
+	bool result;
+
+	saved_cdp = cdp_enabled;
+	saved_narrowing = resctrl_using_extra_partids;
+
+	cdp_enabled = param->cdp_enabled;
+	resctrl_using_extra_partids = param->narrowing_enabled;
+	mpam_partid_map_init(128, param->num_closid);
+
+	result = resctrl_partid_in_closid(param->partid, param->closid);
+	KUNIT_EXPECT_EQ(test, result, param->expected);
+
+	mpam_partid_map_init(0, 0);
+	cdp_enabled = saved_cdp;
+	resctrl_using_extra_partids = saved_narrowing;
+}
+
+static void test_narrowing_boundary_conditions(struct kunit *test)
+{
+	bool saved_narrowing;
+	u8 saved_pmg_max;
+	u32 rmid, idx;
+	u16 partid;
+	u8 pmg;
+
+	saved_pmg_max = mpam_pmg_max;
+	saved_narrowing = resctrl_using_extra_partids;
+
+	resctrl_using_extra_partids = true;
+
+	mpam_pmg_max = 255;
+	rmid = 255 * 256 + 255;
+	partid = resctrl_rmid_to_partid(rmid);
+	pmg = resctrl_rmid_to_pmg(rmid);
+	KUNIT_EXPECT_EQ(test, partid, 255);
+	KUNIT_EXPECT_EQ(test, pmg, 255);
+
+	mpam_pmg_max = 127;
+	rmid = 100 * 128 + 127;
+	partid = resctrl_rmid_to_partid(rmid);
+	pmg = resctrl_rmid_to_pmg(rmid);
+	KUNIT_EXPECT_EQ(test, partid, 100);
+	KUNIT_EXPECT_EQ(test, pmg, 127);
+
+	mpam_pmg_max = 0;
+	rmid = 50;
+	partid = resctrl_rmid_to_partid(rmid);
+	pmg = resctrl_rmid_to_pmg(rmid);
+	KUNIT_EXPECT_EQ(test, partid, 50);
+	KUNIT_EXPECT_EQ(test, pmg, 0);
+
+	mpam_pmg_max = 15;
+	idx = resctrl_arch_rmid_idx_encode(0, 1000);
+	KUNIT_EXPECT_EQ(test, idx, 1000);
+
+	mpam_pmg_max = saved_pmg_max;
+	resctrl_using_extra_partids = saved_narrowing;
+}
+
+static void test_narrowing_full_range_mapping(struct kunit *test)
+{
+	u16 partid, intpartid;
+	bool saved_narrowing;
+	u8 saved_pmg_max;
+	int count = 0;
+	u32 rmid;
+
+	saved_pmg_max = mpam_pmg_max;
+	saved_narrowing = resctrl_using_extra_partids;
+
+	mpam_pmg_max = 31;
+	resctrl_using_extra_partids = true;
+	mpam_partid_map_init(64, 16);
+
+	for (rmid = 0; rmid < 2048; rmid += 32) {
+		partid = resctrl_rmid_to_partid(rmid);
+		intpartid = mpam_partid_to_intpartid(partid);
+
+		KUNIT_EXPECT_LT(test, partid, 64);
+		KUNIT_EXPECT_LT(test, intpartid, 16);
+		KUNIT_EXPECT_EQ(test, intpartid, partid % 16);
+
+		count++;
+	}
+
+	KUNIT_EXPECT_GT(test, count, 0);
+
+	mpam_partid_map_init(0, 0);
+	mpam_pmg_max = saved_pmg_max;
+	resctrl_using_extra_partids = saved_narrowing;
+}
+
 static struct kunit_case mpam_resctrl_test_cases[] = {
 	KUNIT_CASE(test_get_mba_granularity),
 	KUNIT_CASE_PARAM(test_mbw_max_to_percent, test_percent_value_gen_params),
@@ -304,6 +760,16 @@ static struct kunit_case mpam_resctrl_test_cases[] = {
 	KUNIT_CASE(test_percent_to_max_rounding),
 	KUNIT_CASE_PARAM(test_percent_max_roundtrip_stability,
 			 test_all_bwa_wd_gen_params),
+	KUNIT_CASE_PARAM(test_cdp_narrowing_mapping, cdp_narrowing_gen_params),
+	KUNIT_CASE(test_cdp_narrowing_consistency),
+	KUNIT_CASE(test_narrowing_rmid_encode_decode),
+	KUNIT_CASE(test_narrowing_rmid_idx_encode),
+	KUNIT_CASE(test_narrowing_rmid_idx_decode),
+	KUNIT_CASE_PARAM(test_narrowing_partid_mapping, partid_mapping_gen_params),
+	KUNIT_CASE_PARAM(test_narrowing_partid_in_closid,
+			 partid_in_closid_gen_params),
+	KUNIT_CASE(test_narrowing_boundary_conditions),
+	KUNIT_CASE(test_narrowing_full_range_mapping),
 	{}
 };
 
