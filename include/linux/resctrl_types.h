@@ -37,7 +37,14 @@
 /* Number of memory transactions that an MBM event can be configured with */
 #define NUM_MBM_TRANSACTIONS		7
 
-/* Event IDs */
+/*
+ * Monitor Event IDs, representative a variety of monitoring events:
+ * QOS_L3_OCCUP_EVENT_ID:     L3 Cache Occupancy statistics event
+ * QOS_L3_MBM_TOTAL_EVENT_ID: Global Memory Bandwidth statistics event
+ * QOS_L3_MBM_LOCAL_EVENT_ID: L3 Cache Bandwidth statistics event
+ * QOS_L2_OCCUP_EVENT_ID:     L2 Cache Occupancy statistics event
+ * QOS_L2_MBM_CORE_EVENT_ID:  L2 Cache Bandwidth statistics event
+ */
 enum resctrl_event_id {
 	/* Must match value of first event below */
 	QOS_FIRST_EVENT			= 0x01,
@@ -49,6 +56,11 @@ enum resctrl_event_id {
 	QOS_L3_OCCUP_EVENT_ID		= 0x01,
 	QOS_L3_MBM_TOTAL_EVENT_ID	= 0x02,
 	QOS_L3_MBM_LOCAL_EVENT_ID	= 0x03,
+
+	/* ARM MPAM L2 Events */
+	QOS_L2_OCCUP_EVENT_ID,
+	QOS_L2_MBM_CORE_EVENT_ID,
+	QOS_L2_MBM_CORE_OVERFLOW_EVENT_ID,
 
 	/* Intel Telemetry Events */
 	PMT_EVENT_ENERGY,
