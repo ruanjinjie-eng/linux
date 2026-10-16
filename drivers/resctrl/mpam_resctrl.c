@@ -448,7 +448,18 @@ struct rdt_resource *resctrl_arch_get_resource(enum resctrl_res_level l)
 	return &mpam_resctrl_controls[l].resctrl_res;
 }
 
-static int resctrl_arch_mon_ctx_alloc_no_wait(enum resctrl_event_id evtid)
+/*
+ * The arch_mon_ctx for borrowed monitors is a u32[2]: index 0 selects the
+ * monitor for CDP_DATA (and non-CDP) reads, index 1 the monitor for CDP_CODE.
+ * With CDP each partid needs its own accumulating monitor; reprogramming a
+ * single monitor's filter for each sub-read would reset the counter every
+ * time. For the pre-allocated events both entries hold USE_PRE_ALLOCATED.
+ */
+#define MON_CTX_DATA	0
+#define MON_CTX_CODE	1
+
+static int resctrl_arch_mon_ctx_alloc_no_wait(enum resctrl_event_id evtid,
+					      u32 *mon_ctx)
 {
 	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[evtid];
 
@@ -461,9 +472,14 @@ static int resctrl_arch_mon_ctx_alloc_no_wait(enum resctrl_event_id evtid)
 	switch (evtid) {
 	case QOS_L3_OCCUP_EVENT_ID:
 		/* With CDP, one monitor gets used for both code/data reads */
-		return mpam_alloc_csu_mon(mon->class);
+		mon_ctx[MON_CTX_DATA] = mpam_alloc_csu_mon(mon->class);
+		mon_ctx[MON_CTX_CODE] = mon_ctx[MON_CTX_DATA];
+		return mon_ctx[MON_CTX_DATA];
 	case QOS_L3_MBM_LOCAL_EVENT_ID:
 	case QOS_L3_MBM_TOTAL_EVENT_ID:
+		/* Served by the pre-assigned ABMC counters */
+		mon_ctx[MON_CTX_DATA] = USE_PRE_ALLOCATED;
+		mon_ctx[MON_CTX_CODE] = USE_PRE_ALLOCATED;
 		return USE_PRE_ALLOCATED;
 	default:
 		return -EOPNOTSUPP;
@@ -474,16 +490,16 @@ void *resctrl_arch_mon_ctx_alloc(struct rdt_resource *r,
 				 enum resctrl_event_id evtid)
 {
 	DEFINE_WAIT(wait);
-	int *ret;
+	u32 *ret;
 
-	ret = kmalloc_obj(*ret);
+	ret = kmalloc_array(2, sizeof(*ret), GFP_KERNEL);
 	if (!ret)
 		return ERR_PTR(-ENOMEM);
 
 	do {
 		prepare_to_wait(&resctrl_mon_ctx_waiters, &wait,
 				TASK_INTERRUPTIBLE);
-		*ret = resctrl_arch_mon_ctx_alloc_no_wait(evtid);
+		*ret = resctrl_arch_mon_ctx_alloc_no_wait(evtid, ret);
 		if (*ret == -ENOSPC)
 			schedule();
 	} while (*ret == -ENOSPC && !signal_pending(current));
@@ -500,7 +516,7 @@ void *resctrl_arch_mon_ctx_alloc(struct rdt_resource *r,
 }
 
 static void resctrl_arch_mon_ctx_free_no_wait(enum resctrl_event_id evtid,
-					      u32 mon_idx)
+					      const u32 *mon_ctx)
 {
 	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[evtid];
 
@@ -511,7 +527,7 @@ static void resctrl_arch_mon_ctx_free_no_wait(enum resctrl_event_id evtid,
 		return;
 
 	if (evtid == QOS_L3_OCCUP_EVENT_ID)
-		mpam_free_csu_mon(mon->class, mon_idx);
+		mpam_free_csu_mon(mon->class, mon_ctx[MON_CTX_DATA]);
 
 	wake_up(&resctrl_mon_ctx_waiters);
 }
@@ -519,11 +535,9 @@ static void resctrl_arch_mon_ctx_free_no_wait(enum resctrl_event_id evtid,
 void resctrl_arch_mon_ctx_free(struct rdt_resource *r,
 			       enum resctrl_event_id evtid, void *arch_mon_ctx)
 {
-	u32 mon_idx = *(u32 *)arch_mon_ctx;
+	resctrl_arch_mon_ctx_free_no_wait(evtid, arch_mon_ctx);
 
 	kfree(arch_mon_ctx);
-
-	resctrl_arch_mon_ctx_free_no_wait(evtid, mon_idx);
 }
 
 static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
@@ -567,27 +581,27 @@ static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_c
 
 static int read_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
 			     enum mpam_device_features mon_type,
-			     int mon_idx, u32 closid, u32 rmid, u64 *val)
+			     const u32 *mon_ctx, u32 closid, u32 rmid, u64 *val)
 {
 	if (cdp_enabled) {
 		u64 code_val = 0, data_val = 0;
 		int err;
 
-		err = __read_mon(mon, mon_comp, mon_type, mon_idx,
+		err = __read_mon(mon, mon_comp, mon_type, mon_ctx[MON_CTX_CODE],
 				 CDP_CODE, closid, rmid, &code_val);
 		if (err)
 			return err;
 
-		err = __read_mon(mon, mon_comp, mon_type, mon_idx,
+		err = __read_mon(mon, mon_comp, mon_type, mon_ctx[MON_CTX_DATA],
 				 CDP_DATA, closid, rmid, &data_val);
 		if (err)
 			return err;
 
-		*val += code_val + data_val;
+		*val = code_val + data_val;
 		return 0;
 	}
 
-	return __read_mon(mon, mon_comp, mon_type, mon_idx,
+	return __read_mon(mon, mon_comp, mon_type, mon_ctx[MON_CTX_DATA],
 			  CDP_NONE, closid, rmid, val);
 }
 
@@ -598,7 +612,6 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 {
 	struct mpam_resctrl_dom *l3_dom;
 	struct mpam_component *mon_comp;
-	u32 mon_idx = *(u32 *)arch_mon_ctx;
 	enum mpam_device_features mon_type;
 	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[eventid];
 
@@ -618,7 +631,7 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 
 	mon_type = mpam_feat_msmon_csu;
 
-	return read_mon_cdp_safe(mon, mon_comp, mon_type, mon_idx,
+	return read_mon_cdp_safe(mon, mon_comp, mon_type, arch_mon_ctx,
 				 closid, rmid, val);
 }
 
@@ -630,6 +643,8 @@ int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[eventid];
 	struct mpam_resctrl_dom *l3_dom;
 	struct mpam_component *mon_comp;
+	/* The pre-allocated counters resolve their monitor in __read_mon() */
+	u32 mon_ctx_prealloc[2] = { USE_PRE_ALLOCATED, USE_PRE_ALLOCATED };
 
 	if (!mpam_is_enabled())
 		return -EINVAL;
@@ -641,7 +656,7 @@ int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 	mon_comp = l3_dom->mon_comp[eventid];
 
 	return read_mon_cdp_safe(mon, mon_comp, mpam_feat_msmon_mbwu,
-				 USE_PRE_ALLOCATED, closid, rmid, val);
+				 mon_ctx_prealloc, closid, rmid, val);
 }
 
 static void __reset_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
@@ -696,7 +711,6 @@ void resctrl_arch_reset_cntr(struct rdt_resource *r, struct rdt_l3_mon_domain *d
 
 	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
 	mon_comp = l3_dom->mon_comp[eventid];
-
 	reset_mon_cdp_safe(mon, mon_comp, USE_PRE_ALLOCATED, closid, rmid);
 }
 
