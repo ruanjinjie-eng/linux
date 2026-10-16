@@ -2827,8 +2827,12 @@ static void rdt_disable_ctx(void)
 
 static int rdt_enable_ctx(struct rdt_fs_context *ctx)
 {
-	struct rdt_resource *r;
-	int ret = 0;
+	static const enum resctrl_res_level l2_and_pseudo_rids[] = {
+		RDT_RESOURCE_L2, RDT_RESOURCE_L2_MAX, RDT_RESOURCE_L2_MIN,
+		RDT_RESOURCE_L2_PRI,
+	};
+	bool hide;
+	int i, ret = 0;
 
 	if (ctx->enable_cdpl2) {
 		ret = resctrl_arch_set_cdp_enabled(RDT_RESOURCE_L2, true);
@@ -2851,12 +2855,11 @@ static int rdt_enable_ctx(struct rdt_fs_context *ctx)
 	if (ctx->enable_debug)
 		resctrl_debug = true;
 
-	r = resctrl_arch_get_resource(RDT_RESOURCE_L2);
-	/* Only arm64 arch hides L2 resource by default */
-	if (IS_ENABLED(CONFIG_ARM64_MPAM) && !ctx->enable_l2)
-		r->invisible = true;
-	else
-		r->invisible = false;
+	/* Only arm64 arch hides L2 resource by default, along with its
+	 * pseudo resources sharing the same class */
+	hide = IS_ENABLED(CONFIG_ARM64_MPAM) && !ctx->enable_l2;
+	for (i = 0; i < ARRAY_SIZE(l2_and_pseudo_rids); i++)
+		resctrl_arch_get_resource(l2_and_pseudo_rids[i])->invisible = hide;
 
 	return 0;
 
