@@ -1105,6 +1105,58 @@ static bool traffic_matches_l3(struct mpam_class *class)
 	return true;
 }
 
+/*
+ * Test if the provided class is the same shape as the NUMA nodes: every
+ * component's affinity mask is exactly one node's CPUs, and the
+ * components together cover all the CPUs.
+ *
+ * Memory-side controls sit at the memory controllers, where the natural
+ * scope is the node, however many L3s the node may have. x86's MBA has
+ * the same scoping, while its MBM monitors are L3-scoped.
+ *
+ * Several components may cover the same node, e.g. one per memory
+ * controller: like the L3-shaped case, they share the node's domain.
+ */
+static bool topology_matches_node(struct mpam_class *victim)
+{
+	int cpu;
+	struct mpam_component *victim_iter;
+
+	lockdep_assert_cpus_held();
+
+	cpumask_var_t __free(free_cpumask_var) tmp_cpumask = CPUMASK_VAR_NULL;
+	if (!alloc_cpumask_var(&tmp_cpumask, GFP_KERNEL))
+		return false;
+
+	guard(srcu)(&mpam_srcu);
+	list_for_each_entry_srcu(victim_iter, &victim->components, class_list,
+				 srcu_read_lock_held(&mpam_srcu)) {
+		if (cpumask_empty(&victim_iter->affinity)) {
+			pr_debug("class %u has CPU-less component %u\n",
+				 victim->level, victim_iter->comp_id);
+			return false;
+		}
+
+		cpu = cpumask_any(&victim_iter->affinity);
+
+		if (!cpumask_equal(&victim_iter->affinity,
+				   cpumask_of_node(cpu_to_node(cpu)))) {
+			pr_debug("class %u component %u is not node shaped\n",
+				 victim->level, victim_iter->comp_id);
+			return false;
+		}
+
+		cpumask_or(tmp_cpumask, tmp_cpumask, &victim_iter->affinity);
+	}
+
+	if (!cpumask_equal(tmp_cpumask, cpu_possible_mask)) {
+		pr_debug("class %u does not cover all CPUs\n", victim->level);
+		return false;
+	}
+
+	return true;
+}
+
 /* Test whether we can export MPAM_CLASS_CACHE:{2,3}? */
 static void mpam_resctrl_pick_caches(void)
 {
@@ -1189,16 +1241,31 @@ static void mpam_resctrl_pick_mba(void)
 			continue;
 		}
 
-		if (!topology_matches_l3(class)) {
-			pr_debug("class %u topology doesn't match L3\n",
-				 class->level);
-			continue;
-		}
+		if (class->type == MPAM_CLASS_MEMORY) {
+			/*
+			 * Memory-side controls are meaningfully scoped per
+			 * node however many L3s the node has - the counters
+			 * at the memory controllers see the whole node's
+			 * traffic. Only the shape has to match: one
+			 * component per node, covering all the CPUs.
+			 */
+			if (!topology_matches_node(class)) {
+				pr_debug("class %u topology doesn't match the NUMA nodes\n",
+					 class->level);
+				continue;
+			}
+		} else {
+			if (!topology_matches_l3(class)) {
+				pr_debug("class %u topology doesn't match L3\n",
+					 class->level);
+				continue;
+			}
 
-		if (!traffic_matches_l3(class)) {
-			pr_debug("class %u traffic doesn't match L3 egress\n",
-				 class->level);
-			continue;
+			if (!traffic_matches_l3(class)) {
+				pr_debug("class %u traffic doesn't match L3 egress\n",
+					 class->level);
+				continue;
+			}
 		}
 
 		/*
@@ -1342,9 +1409,11 @@ static void mpam_resctrl_pick_counters(void)
 		}
 
 		if (class_has_usable_mbwu(class) &&
-		    topology_matches_l3(class) &&
-		    traffic_matches_l3(class)) {
-			pr_debug("class %u has usable MBWU, and matches L3 topology and traffic\n",
+		    ((class->type == MPAM_CLASS_MEMORY &&
+		      topology_matches_node(class)) ||
+		     (topology_matches_l3(class) &&
+		      traffic_matches_l3(class)))) {
+			pr_debug("class %u has usable MBWU, and matches the L3 or node topology\n",
 				 class->level);
 
 			/*
@@ -1355,6 +1424,12 @@ static void mpam_resctrl_pick_counters(void)
 			 * calculate mbm_local except when we only have one L3
 			 * and it's equivalent to mbm_total and so always use
 			 * mbm_total.
+			 *
+			 * A node-shaped memory class exports node-scoped
+			 * counters: with several L3s in the node, the
+			 * mbm_total_bytes of every L3 of the node reports
+			 * the node total, matching what the MBA controls of
+			 * the node act on.
 			 */
 			counter_update_class(QOS_L3_MBM_TOTAL_EVENT_ID, class);
 		}
@@ -1578,6 +1653,11 @@ static int mpam_resctrl_pick_domain_id(int cpu, struct mpam_component *comp)
 			return comp->comp_id;
 
 		return id;
+	}
+
+	if (class->type == MPAM_CLASS_MEMORY && topology_matches_node(class)) {
+		/* Node-scoped controls: use the NUMA node id */
+		return cpu_to_node(cpu);
 	}
 
 	/* Otherwise, expose the ID used by the firmware table code. */
