@@ -54,7 +54,23 @@ enum resctrl_res_level {
 	RDT_RESOURCE_MBA,
 	RDT_RESOURCE_SMBA,
 	RDT_RESOURCE_PERF_PKG,
-	RDT_RESOURCE_LAST = RDT_RESOURCE_PERF_PKG
+	/*
+	 * Pseudo resources re-using the class picked for the resource above
+	 * to expose the MPAM priority/capacity/limit controls. They have no
+	 * class of their own, share the base resource's domains, and never
+	 * appear in info/.
+	 */
+	RDT_RESOURCE_L3_MAX,
+	RDT_RESOURCE_L2_MAX,
+	RDT_RESOURCE_L3_MIN,
+	RDT_RESOURCE_L2_MIN,
+	RDT_RESOURCE_MB_MIN,
+	RDT_RESOURCE_L3_PRI,
+	RDT_RESOURCE_L2_PRI,
+	RDT_RESOURCE_MB_PRI,
+	RDT_RESOURCE_MB_HDL,
+	RDT_RESOURCE_MB_OPT,
+	RDT_RESOURCE_LAST = RDT_RESOURCE_MB_OPT
 };
 
 #define RDT_NUM_RESOURCES (RDT_RESOURCE_LAST + 1)
@@ -410,7 +426,20 @@ static inline u32 resctrl_get_default_ctrl(struct rdt_resource *r)
 	case RESCTRL_SCHEMA_BITMAP:
 		return BIT_MASK(r->cache.cbm_len) - 1;
 	case RESCTRL_SCHEMA_RANGE:
-		return r->membw.max_bw;
+		switch (r->rid) {
+		case RDT_RESOURCE_L3_MIN:
+		case RDT_RESOURCE_L2_MIN:
+		case RDT_RESOURCE_MB_MIN:
+		case RDT_RESOURCE_L3_PRI:
+		case RDT_RESOURCE_L2_PRI:
+			return 0;
+		case RDT_RESOURCE_MB_PRI:
+			return 3;
+		case RDT_RESOURCE_MB_HDL:
+			return 1;
+		default:
+			return r->membw.max_bw;
+		}
 	}
 
 	return WARN_ON_ONCE(1);
