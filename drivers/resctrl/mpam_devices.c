@@ -878,8 +878,11 @@ static void mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 		 */
 		props->bwa_wd = min(props->bwa_wd, 16);
 
-		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MAX, mbw_features))
+		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MAX, mbw_features)) {
 			mpam_set_feature(mpam_feat_mbw_max, props);
+			/* The hard-limit bit is a config bit, not a capability */
+			mpam_set_feature(mpam_feat_max_limit, props);
+		}
 
 		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MIN, mbw_features))
 			mpam_set_feature(mpam_feat_mbw_min, props);
@@ -1584,7 +1587,6 @@ static u16 mpam_wa_t241_calc_min_from_max(struct mpam_props *props,
 static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 				      struct mpam_config *cfg)
 {
-	u16 cmax = MPAMCFG_CMAX_CMAX;
 	struct mpam_msc *msc = ris->vmsc->msc;
 	struct mpam_props *rprops = &ris->props;
 
@@ -1639,6 +1641,9 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 	if (mpam_has_feature(mpam_feat_mbw_min, rprops)) {
 		u16 val = 0;
 
+		if (mpam_has_feature(mpam_feat_mbw_min, cfg))
+			val = cfg->mbw_min;
+
 		if (mpam_has_quirk(T241_FORCE_MBW_MIN_TO_ONE, msc)) {
 			u16 min = mpam_wa_t241_force_mbw_min_to_one(rprops);
 
@@ -1650,20 +1655,37 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 	}
 
 	if (mpam_has_feature(mpam_feat_mbw_max, rprops)) {
+		u32 val = MPAMCFG_MBW_MAX_MAX;
+
 		if (mpam_has_feature(mpam_feat_mbw_max, cfg))
-			mpam_write_partsel_reg(msc, MBW_MAX, cfg->mbw_max);
-		else
-			mpam_write_partsel_reg(msc, MBW_MAX, MPAMCFG_MBW_MAX_MAX);
+			val = cfg->mbw_max;
+
+		/*
+		 * The hard-limit bit follows its own feature bit: MBHDL can
+		 * be configured without MBW_MAX ever being written.
+		 */
+		if (mpam_has_feature(mpam_feat_max_limit, cfg) && cfg->max_limit)
+			val |= MPAMCFG_MBW_MAX_HARDLIM;
+
+		mpam_write_partsel_reg(msc, MBW_MAX, val);
 	}
 
 	if (mpam_has_feature(mpam_feat_mbw_prop, rprops))
 		mpam_write_partsel_reg(msc, MBW_PROP, 0);
 
-	if (mpam_has_feature(mpam_feat_cmax_cmax, rprops))
-		mpam_write_partsel_reg(msc, CMAX, cmax);
+	if (mpam_has_feature(mpam_feat_cmax_cmax, rprops)) {
+		if (mpam_has_feature(mpam_feat_cmax_cmax, cfg))
+			mpam_write_partsel_reg(msc, CMAX, cfg->cmax);
+		else
+			mpam_write_partsel_reg(msc, CMAX, MPAMCFG_CMAX_CMAX);
+	}
 
-	if (mpam_has_feature(mpam_feat_cmax_cmin, rprops))
-		mpam_write_partsel_reg(msc, CMIN, 0);
+	if (mpam_has_feature(mpam_feat_cmax_cmin, rprops)) {
+		if (mpam_has_feature(mpam_feat_cmax_cmin, cfg))
+			mpam_write_partsel_reg(msc, CMIN, cfg->cmin);
+		else
+			mpam_write_partsel_reg(msc, CMIN, 0);
+	}
 
 	if (mpam_has_feature(mpam_feat_cmax_cassoc, rprops))
 		mpam_write_partsel_reg(msc, CASSOC, MPAMCFG_CASSOC_CASSOC);
@@ -1678,6 +1700,9 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 			/* aces high? */
 			if (!mpam_has_feature(mpam_feat_intpri_part_0_low, rprops))
 				intpri = 0;
+
+			if (mpam_has_feature(mpam_feat_intpri_part, cfg))
+				intpri = cfg->intpri;
 
 			pri_val |= FIELD_PREP(MPAMCFG_PRI_INTPRI, intpri);
 		}
@@ -3006,7 +3031,14 @@ void mpam_enable(struct work_struct *work)
 }
 
 #define maybe_update_config(cfg, feature, newcfg, member, changes) do { \
-	if (mpam_has_feature(feature, newcfg) &&			\
+	if (!mpam_has_feature(feature, newcfg))			\
+		break;							\
+	/*								\
+	 * Adopting a feature is itself a change: 0 is a valid value	\
+	 * for several controls, and writing it must reprogram the	\
+	 * reset value, not just merge the (equal) number.		\
+	 */								\
+	if (!mpam_has_feature(feature, cfg) ||			\
 	    (newcfg)->member != (cfg)->member) {			\
 		(cfg)->member = (newcfg)->member;			\
 		mpam_set_feature(feature, cfg);				\
@@ -3023,6 +3055,11 @@ static bool mpam_update_config(struct mpam_config *cfg,
 	maybe_update_config(cfg, mpam_feat_cpor_part, newcfg, cpbm, has_changes);
 	maybe_update_config(cfg, mpam_feat_mbw_part, newcfg, mbw_pbm, has_changes);
 	maybe_update_config(cfg, mpam_feat_mbw_max, newcfg, mbw_max, has_changes);
+	maybe_update_config(cfg, mpam_feat_mbw_min, newcfg, mbw_min, has_changes);
+	maybe_update_config(cfg, mpam_feat_max_limit, newcfg, max_limit, has_changes);
+	maybe_update_config(cfg, mpam_feat_cmax_cmax, newcfg, cmax, has_changes);
+	maybe_update_config(cfg, mpam_feat_cmax_cmin, newcfg, cmin, has_changes);
+	maybe_update_config(cfg, mpam_feat_intpri_part, newcfg, intpri, has_changes);
 
 	return has_changes;
 }
