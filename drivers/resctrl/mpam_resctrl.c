@@ -45,7 +45,7 @@ static struct mpam_resctrl_res mpam_resctrl_controls[RDT_NUM_RESOURCES];
  * to those supported by MPAM.
  * Class pointer may be NULL.
  */
-#define MPAM_MAX_EVENT QOS_L3_MBM_TOTAL_EVENT_ID
+#define MPAM_MAX_EVENT QOS_L2_MBM_CORE_OVERFLOW_EVENT_ID
 static struct mpam_resctrl_mon mpam_resctrl_counters[MPAM_MAX_EVENT + 1];
 
 #define for_each_mpam_resctrl_mon(mon, eventid)					\
@@ -197,6 +197,7 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 	u32 partid_i = RESCTRL_RESERVED_CLOSID, partid_d = RESCTRL_RESERVED_CLOSID;
 	struct mpam_resctrl_res *res = &mpam_resctrl_controls[RDT_RESOURCE_L3];
 	struct rdt_resource *l3 = &res->resctrl_res;
+	enum resctrl_res_level i;
 	int cpu;
 
 	if (!IS_ENABLED(CONFIG_EXPERT) && enable) {
@@ -218,10 +219,22 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 	cdp_enabled = enable;
 	mpam_resctrl_controls[rid].cdp_enabled = enable;
 
-	if (enable)
-		l3->mon.num_rmid = resctrl_arch_system_num_rmid_idx() / 2;
-	else
-		l3->mon.num_rmid = resctrl_arch_system_num_rmid_idx();
+	/*
+	 * CDP emulation consumes two PARTIDs per closid, halving the PARTIDs
+	 * available for monitoring - no matter which resource the mount
+	 * option was for. Update num_rmid for all mon_capable resources,
+	 * e.g. the L2 monitors as well as the L3.
+	 */
+	for_each_mpam_resctrl_control(res, i) {
+		struct rdt_resource *r = &res->resctrl_res;
+
+		if (!r->mon_capable)
+			continue;
+
+		r->mon.num_rmid = resctrl_arch_system_num_rmid_idx();
+		if (enable)
+			r->mon.num_rmid /= 2;
+	}
 
 	/* The mbw_max feature can't hide cdp as it's a per-partid maximum. */
 	if (cdp_enabled && !mpam_resctrl_controls[RDT_RESOURCE_MBA].cdp_enabled)
@@ -471,6 +484,7 @@ static int resctrl_arch_mon_ctx_alloc_no_wait(enum resctrl_event_id evtid,
 
 	switch (evtid) {
 	case QOS_L3_OCCUP_EVENT_ID:
+	case QOS_L2_OCCUP_EVENT_ID:
 		/* With CDP, one monitor gets used for both code/data reads */
 		mon_ctx[MON_CTX_DATA] = mpam_alloc_csu_mon(mon->class);
 		mon_ctx[MON_CTX_CODE] = mon_ctx[MON_CTX_DATA];
@@ -481,6 +495,31 @@ static int resctrl_arch_mon_ctx_alloc_no_wait(enum resctrl_event_id evtid,
 		mon_ctx[MON_CTX_DATA] = USE_PRE_ALLOCATED;
 		mon_ctx[MON_CTX_CODE] = USE_PRE_ALLOCATED;
 		return USE_PRE_ALLOCATED;
+	case QOS_L2_MBM_CORE_EVENT_ID:
+		/*
+		 * The L2 event is not part of resctrl's L3 MBM event range,
+		 * so the assignable-counter machinery never applies: borrow a
+		 * bandwidth monitor for the duration of the read, like the
+		 * occupancy events do with CSU monitors. With CDP, borrow one
+		 * monitor per partid so code and data both accumulate.
+		 */
+		mon_ctx[MON_CTX_DATA] = mpam_alloc_mbwu_mon(mon->class);
+		if (mon_ctx[MON_CTX_DATA] < 0)
+			return mon_ctx[MON_CTX_DATA];
+
+		if (!cdp_enabled) {
+			mon_ctx[MON_CTX_CODE] = mon_ctx[MON_CTX_DATA];
+			return mon_ctx[MON_CTX_DATA];
+		}
+
+		mon_ctx[MON_CTX_CODE] = mpam_alloc_mbwu_mon(mon->class);
+		if (mon_ctx[MON_CTX_CODE] < 0) {
+			int err = mon_ctx[MON_CTX_CODE];
+
+			mpam_free_mbwu_mon(mon->class, mon_ctx[MON_CTX_DATA]);
+			return err;
+		}
+		return mon_ctx[MON_CTX_DATA];
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -526,8 +565,14 @@ static void resctrl_arch_mon_ctx_free_no_wait(enum resctrl_event_id evtid,
 	if (!mon->class)
 		return;
 
-	if (evtid == QOS_L3_OCCUP_EVENT_ID)
+	if (evtid == QOS_L3_OCCUP_EVENT_ID || evtid == QOS_L2_OCCUP_EVENT_ID)
 		mpam_free_csu_mon(mon->class, mon_ctx[MON_CTX_DATA]);
+	if (evtid == QOS_L2_MBM_CORE_EVENT_ID) {
+		mpam_free_mbwu_mon(mon->class, mon_ctx[MON_CTX_DATA]);
+		if (mon_ctx[MON_CTX_CODE] != mon_ctx[MON_CTX_DATA] &&
+		    mon_ctx[MON_CTX_CODE] != USE_PRE_ALLOCATED)
+			mpam_free_mbwu_mon(mon->class, mon_ctx[MON_CTX_CODE]);
+	}
 
 	wake_up(&resctrl_mon_ctx_waiters);
 }
@@ -626,10 +671,18 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 	l3_dom = container_of(hdr, struct mpam_resctrl_dom, resctrl_mon_dom.hdr);
 	mon_comp = l3_dom->mon_comp[eventid];
 
-	if (eventid != QOS_L3_OCCUP_EVENT_ID)
+	if (eventid == QOS_L3_OCCUP_EVENT_ID || eventid == QOS_L2_OCCUP_EVENT_ID) {
+		mon_type = mpam_feat_msmon_csu;
+	} else if (eventid == QOS_L2_MBM_CORE_EVENT_ID) {
+		/*
+		 * Served by a bandwidth monitor borrowed for the read via
+		 * resctrl_arch_mon_ctx_alloc(); the L3 MBWU events use the
+		 * ABMC resctrl_arch_cntr_read() path instead.
+		 */
+		mon_type = mpam_feat_msmon_mbwu;
+	} else {
 		return -EINVAL;
-
-	mon_type = mpam_feat_msmon_csu;
+	}
 
 	return read_mon_cdp_safe(mon, mon_comp, mon_type, arch_mon_ctx,
 				 closid, rmid, val);
@@ -649,7 +702,8 @@ int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 	if (!mpam_is_enabled())
 		return -EINVAL;
 
-	if (eventid == QOS_L3_OCCUP_EVENT_ID || !mon->class)
+	if (eventid == QOS_L3_OCCUP_EVENT_ID ||
+	    eventid == QOS_L2_OCCUP_EVENT_ID || !mon->class)
 		return -EINVAL;
 
 	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
@@ -706,11 +760,13 @@ void resctrl_arch_reset_cntr(struct rdt_resource *r, struct rdt_l3_mon_domain *d
 	if (!mpam_is_enabled())
 		return;
 
-	if (eventid == QOS_L3_OCCUP_EVENT_ID || !mon->class)
+	if (eventid == QOS_L3_OCCUP_EVENT_ID ||
+	    eventid == QOS_L2_OCCUP_EVENT_ID || !mon->class)
 		return;
 
 	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
 	mon_comp = l3_dom->mon_comp[eventid];
+
 	reset_mon_cdp_safe(mon, mon_comp, USE_PRE_ALLOCATED, closid, rmid);
 }
 
@@ -1200,9 +1256,13 @@ static void mpam_resctrl_pick_counters(void)
 	guard(srcu)(&mpam_srcu);
 	list_for_each_entry_srcu(class, &mpam_classes, classes_list,
 				 srcu_read_lock_held(&mpam_srcu)) {
-		/* The name of the resource is L3... */
-		if (class->type == MPAM_CLASS_CACHE && class->level != 3) {
-			pr_debug("class %u is a cache but not the L3", class->level);
+		/*
+		 * Cache counters are presented as the L2 or L3 resource,
+		 * matching the cache the MSCs were built with.
+		 */
+		if (class->type == MPAM_CLASS_CACHE && class->level != 2 &&
+		    class->level != 3) {
+			pr_debug("class %u is a cache but not L2 or L3", class->level);
 			continue;
 		}
 
@@ -1222,7 +1282,10 @@ static void mpam_resctrl_pick_counters(void)
 				if (update_rmid_limits(class))
 					break;
 
-				counter_update_class(QOS_L3_OCCUP_EVENT_ID, class);
+				counter_update_class(class->level == 2 ?
+						     QOS_L2_OCCUP_EVENT_ID :
+						     QOS_L3_OCCUP_EVENT_ID,
+						     class);
 				break;
 			default:
 				break;
@@ -1245,6 +1308,19 @@ static void mpam_resctrl_pick_counters(void)
 			 * mbm_total.
 			 */
 			counter_update_class(QOS_L3_MBM_TOTAL_EVENT_ID, class);
+		}
+
+		/*
+		 * An L2 MSC measures the bandwidth of the traffic its cache
+		 * sees from the CPUs that share it, which is what resctrl
+		 * presents as the per-L2 mbm_core_bytes event.
+		 */
+		if (class->type == MPAM_CLASS_CACHE && class->level == 2 &&
+		    class_has_usable_mbwu(class)) {
+			pr_debug("class %u has usable MBWU for the L2 resource\n",
+				 class->level);
+
+			counter_update_class(QOS_L2_MBM_CORE_EVENT_ID, class);
 		}
 	}
 }
@@ -1408,46 +1484,50 @@ static int mpam_resctrl_monitor_init_abmc(struct mpam_resctrl_mon *mon)
 static int mpam_resctrl_monitor_init(struct mpam_resctrl_mon *mon,
 				     enum resctrl_event_id type)
 {
-	struct mpam_resctrl_res *res = &mpam_resctrl_controls[RDT_RESOURCE_L3];
-	struct rdt_resource *l3 = &res->resctrl_res;
+	enum resctrl_res_level res_level;
+	struct mpam_resctrl_res *res;
+	struct rdt_resource *r;
+	int cache_level;
 
 	lockdep_assert_cpus_held();
 
-	/*
-	 * There also needs to be an L3 cache present.
-	 * The check just requires any online CPU and it can't go offline as we
-	 * hold the cpu lock.
-	 */
-	if (get_cpu_cacheinfo_id(raw_smp_processor_id(), 3) == -1)
+	switch (type) {
+	case QOS_L2_OCCUP_EVENT_ID:
+	case QOS_L2_MBM_CORE_EVENT_ID:
+	case QOS_L2_MBM_CORE_OVERFLOW_EVENT_ID:
+		cache_level = 2;
+		res_level = RDT_RESOURCE_L2;
+		break;
+	case QOS_L3_OCCUP_EVENT_ID:
+	case QOS_L3_MBM_LOCAL_EVENT_ID:
+	case QOS_L3_MBM_TOTAL_EVENT_ID:
+		cache_level = 3;
+		res_level = RDT_RESOURCE_L3;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	res = &mpam_resctrl_controls[res_level];
+	r = &res->resctrl_res;
+
+	if (get_cpu_cacheinfo_id(raw_smp_processor_id(), cache_level) == -1)
 		return 0;
 
-	/*
-	 * If there are no MPAM resources on L3, force it into existence.
-	 * topology_matches_l3() already ensures this looks like the L3.
-	 * The domain-ids will be fixed up by mpam_resctrl_domain_hdr_init().
-	 */
 	if (!res->class) {
-		pr_warn_once("Faking L3 MSC to enable counters.\n");
+		pr_warn_once("Faking L%d MSC to enable counters.\n", cache_level);
 		res->class = mpam_resctrl_counters[type].class;
 	}
 
-	/*
-	 * Called multiple times!, once per event type that has a
-	 * monitoring class.
-	 * Setting name is necessary on monitor only platforms.
-	 */
-	l3->name = "L3";
-	l3->mon_scope = RESCTRL_L3_CACHE;
+	if (cache_level == 3) {
+		r->name = "L3";
+		r->mon_scope = RESCTRL_L3_CACHE;
+	} else {
+		r->name = "L2";
+		r->mon_scope = RESCTRL_L2_CACHE;
+	}
 
-	/*
-	 * num-rmid is the upper bound for the number of monitoring groups that
-	 * can exist simultaneously, including the default monitoring group for
-	 * each control group. Hence, advertise the whole rmid_idx space even
-	 * though each control group has its own pmg/rmid space. Unfortunately,
-	 * this does mean userspace needs to know the architecture to correctly
-	 * interpret this value.
-	 */
-	l3->mon.num_rmid = resctrl_arch_system_num_rmid_idx();
+	r->mon.num_rmid = resctrl_arch_system_num_rmid_idx();
 
 	if (type == QOS_L3_MBM_TOTAL_EVENT_ID) {
 		int err;
@@ -1457,13 +1537,13 @@ static int mpam_resctrl_monitor_init(struct mpam_resctrl_mon *mon,
 			return err;
 
 		static_assert(MAX_EVT_CONFIG_BITS == 0x7f);
-		l3->mon.mbm_cfg_mask = MAX_EVT_CONFIG_BITS;
+		r->mon.mbm_cfg_mask = MAX_EVT_CONFIG_BITS;
 	}
 
 	if (!resctrl_enable_mon_event(type, false, 0, NULL))
 		return -EINVAL;
 
-	l3->mon_capable = true;
+	r->mon_capable = true;
 
 	return 0;
 }

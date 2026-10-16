@@ -208,15 +208,32 @@ bool has_busy_rmid(struct rdt_l3_mon_domain *d)
 static struct rmid_entry *resctrl_find_free_rmid(u32 closid)
 {
 	struct rmid_entry *itr;
+	u32 idx_limit = resctrl_arch_system_num_rmid_idx();
+
+	/*
+	 * On architectures where the RMID index determines the request
+	 * PARTID (RESCTRL_RMID_DEPENDS_ON_CLOSID), CDP consumes two
+	 * PARTIDs per index - code and data - so only indices from the
+	 * lower half of the range stay in range while it is enabled.
+	 * setup_rmid_lru_list() populated the free list with the whole
+	 * range and is only built once, so filter here, against the
+	 * current CDP state.
+	 */
+	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID) &&
+	    (resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L3) ||
+	     resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L2)))
+		idx_limit /= 2;
 
 	if (list_empty(&rmid_free_lru))
 		return rmid_limbo_count ? ERR_PTR(-EBUSY) : ERR_PTR(-ENOSPC);
 
 	list_for_each_entry(itr, &rmid_free_lru, list) {
-		/*
-		 * Check if the free RMID matches the target CLOSID.
-		 * Architecture-specific rules apply.
-		 */
+		u32 idx = resctrl_arch_rmid_idx_encode(itr->closid, itr->rmid);
+
+		/* Out of the CDP-limited range, or a different CLOSID. */
+		if (idx >= idx_limit)
+			continue;
+
 		if (resctrl_arch_rmid_idx_match(closid, itr->closid))
 			return itr;
 	}
