@@ -2120,21 +2120,31 @@ static int mpam_msc_drv_probe(struct platform_device *pdev)
 	msc = do_mpam_msc_drv_probe(pdev);
 	mutex_unlock(&mpam_list_lock);
 
-	if (IS_ERR(msc))
-		return PTR_ERR(msc);
+	if (IS_ERR(msc)) {
+		err = PTR_ERR(msc);
+		goto out;
+	}
 
 	/* Create RIS entries described by firmware */
 	err = acpi_mpam_parse_resources(msc, plat_data);
-	if (err) {
+	if (err)
 		mpam_msc_drv_remove(pdev);
-		return err;
-	}
-
-	if (atomic_add_return(1, &mpam_num_msc) == fw_num_msc)
+out:
+	/*
+	 * A failed MSC must not prevent MPAM being enabled for the
+	 * surviving devices. Firmware may describe MSCs that are not
+	 * accessible from any possible CPU, e.g. when the possible CPUs
+	 * were restricted by nr_cpus=. The failed device is not
+	 * re-probed, so count it here too: otherwise the counter never
+	 * reaches fw_num_msc, the discovery cpuhp callbacks are never
+	 * registered and mpam_enable() is never scheduled - MPAM stays
+	 * dead system-wide, without any error message.
+	 */
+	if (atomic_inc_return(&mpam_num_msc) == fw_num_msc)
 		mpam_register_cpuhp_callbacks(mpam_discovery_cpu_online, NULL,
 					      "mpam:drv_probe");
 
-	return 0;
+	return err;
 }
 
 static struct platform_driver mpam_msc_driver = {
