@@ -62,6 +62,9 @@ static DEFINE_MUTEX(domain_list_lock);
  */
 static bool cdp_enabled;
 
+static u32 resctrl_num_closid = 1;
+static u32 resctrl_num_mon_partid = 1;
+
 /* If resctrl is leveraging extra request PARTIDs for monitoring. */
 static bool resctrl_using_extra_partids;
 
@@ -205,8 +208,20 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 		return -EOPNOTSUPP;
 	}
 
-	if (enable)
+	if (enable) {
+		/*
+		 * CDP needs a (data, code) pair of PARTIDs for each control
+		 * group. With PARTID narrowing the request PARTIDs are paired
+		 * as well, so the number of internal PARTIDs must be even.
+		 */
+		if (mpam_partid_max < 1 || resctrl_num_closid < 2 ||
+		    (resctrl_using_extra_partids && resctrl_num_closid % 2)) {
+			pr_warn("CDP not supported: not enough PARTIDs\n");
+			return -EINVAL;
+		}
+
 		pr_warn("CDP is an expert feature and may cause MPAM to malfunction.\n");
+	}
 
 	/*
 	 * resctrl_arch_set_cdp_enabled() is only called with enable set to
@@ -219,6 +234,16 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 		l3->mon.num_rmid = resctrl_arch_system_num_rmid_idx() / 2;
 	else
 		l3->mon.num_rmid = resctrl_arch_system_num_rmid_idx();
+
+	/*
+	 * When the extra request PARTIDs are in use, the (CLOSID, RMID) pair
+	 * decoded from an index depends on CDP: a control group owns the
+	 * (data, code) pair of request PARTIDs. No RMID is allocated while
+	 * resctrl is being mounted or has been torn down, so the mapping can
+	 * be rebuilt now.
+	 */
+	if (resctrl_using_extra_partids)
+		resctrl_rmid_map_reinit();
 
 	/* The mbw_max feature can't hide cdp as it's a per-partid maximum. */
 	if (cdp_enabled && !mpam_resctrl_controls[RDT_RESOURCE_MBA].cdp_enabled)
@@ -237,9 +262,6 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 		mpam_resctrl_controls[RDT_RESOURCE_MBA].resctrl_res.alloc_capable = true;
 
 	if (enable) {
-		if (mpam_partid_max < 1)
-			return -EINVAL;
-
 		partid_d = resctrl_get_config_index(RESCTRL_RESERVED_CLOSID, CDP_DATA);
 		partid_i = resctrl_get_config_index(RESCTRL_RESERVED_CLOSID, CDP_CODE);
 	}
@@ -269,12 +291,12 @@ static bool mpam_resctrl_hide_cdp(enum resctrl_res_level rid)
  */
 u32 resctrl_arch_get_num_closid(struct rdt_resource *ignored)
 {
-	return mpam_partid_max + 1;
+	return resctrl_num_closid;
 }
 
 u32 resctrl_arch_system_num_rmid_idx(void)
 {
-	return (mpam_pmg_max + 1) * (mpam_partid_max + 1);
+	return (mpam_pmg_max + 1) * resctrl_num_mon_partid;
 }
 
 /* The request PARTID and PMG a resctrl RMID maps onto. */
@@ -297,12 +319,6 @@ static u32 resctrl_mbwu_idx(u32 partid, u8 pmg)
 	return partid * (mpam_pmg_max + 1) + pmg;
 }
 
-/* The control group that owns a request PARTID. */
-static u16 resctrl_partid_to_closid(u16 partid)
-{
-	return mpam_partid_to_intpartid(partid);
-}
-
 u32 resctrl_arch_rmid_idx_encode(u32 closid, u32 rmid)
 {
 	if (resctrl_using_extra_partids)
@@ -322,8 +338,26 @@ void resctrl_arch_rmid_idx_decode(u32 idx, u32 *closid, u32 *rmid)
 	if (resctrl_using_extra_partids) {
 		if (rmid)
 			*rmid = idx;
-		if (closid)
-			*closid = resctrl_partid_to_closid(resctrl_rmid_to_partid(idx));
+		if (closid) {
+			u32 grp = resctrl_rmid_to_partid(idx);
+
+			if (!cdp_enabled) {
+				*closid = mpam_partid_to_intpartid(grp);
+			} else if (grp < resctrl_num_mon_partid / 2) {
+				/*
+				 * The flat index is a monitoring group whose
+				 * request PARTIDs are 2*grp and 2*grp+1. Those
+				 * map onto the internal PARTID pair of control
+				 * group grp % (N/2). The upper half of the
+				 * flat index space has no such pair and must
+				 * never be allocated.
+				 */
+				*closid = grp % (resctrl_num_closid / 2);
+			} else {
+				/* Never matches a target CLOSID. */
+				*closid = resctrl_num_closid - 1;
+			}
+		}
 		return;
 	}
 
@@ -1958,6 +1992,89 @@ void mpam_resctrl_offline_cpu(unsigned int cpu)
 	}
 }
 
+/*
+ * Decide how the PARTID space is presented to resctrl. This runs once the
+ * classes are known, and before resctrl_init() advertises any limits to
+ * user-space.
+ *
+ * The extra request PARTIDs on a class that implements narrowing can be used
+ * as monitoring groups. That is only safe when no class would lose a
+ * non-aliasing control: its value can not be written to each PARTID of a
+ * control group, whereas an aliasing control's value can. A class that
+ * implements narrowing doesn't have the problem, as its PARTIDs are already
+ * configured as one.
+ *
+ * Every class is considered, including the ones resctrl doesn't use. An
+ * unknown class may gain a resctrl schema later, and using the extra PARTIDs
+ * would prevent that.
+ */
+static void mpam_resctrl_configure_partids(void)
+{
+	u32 num_closid = (u32)mpam_partid_max + 1;
+	bool can_expand = false, blocked = false;
+	struct mpam_class *class;
+
+	guard(srcu)(&mpam_srcu);
+	list_for_each_entry_srcu(class, &mpam_classes, classes_list,
+				 srcu_read_lock_held(&mpam_srcu)) {
+		struct mpam_component *comp;
+		struct mpam_vmsc *vmsc;
+		struct mpam_msc_ris *ris;
+
+		num_closid = min(num_closid, (u32)class->props.intpartid_max + 1);
+
+		/*
+		 * Inspect the RIS, not the class: aliasing RIS of the same
+		 * vMSC have their features merged with a bitwise-or, so the
+		 * class can advertise narrowing and a non-aliasing control at
+		 * the same time even though no single RIS has both.
+		 */
+		list_for_each_entry_rcu(comp, &class->components, class_list) {
+			list_for_each_entry_rcu(vmsc, &comp->vmsc, comp_list) {
+				list_for_each_entry_rcu(ris, &vmsc->ris, vmsc_list) {
+					struct mpam_props *rprops = &ris->props;
+
+					if (mpam_has_feature(mpam_feat_partid_nrw,
+							     rprops)) {
+						if (rprops->intpartid_max <
+						    rprops->partid_max)
+							can_expand = true;
+					} else if (mpam_props_has_non_aliasing_controls(rprops)) {
+						pr_debug("class %u has non-aliasing controls without narrowing\n",
+							 class->level);
+						blocked = true;
+					}
+				}
+			}
+		}
+	}
+
+	if (!num_closid)
+		num_closid = 1;
+
+	resctrl_num_closid = num_closid;
+
+	/*
+	 * The extra request PARTIDs only help if the system-wide request
+	 * PARTID range is actually larger than the internal one. A class can
+	 * advertise narrowing while another requestor limits partid_max.
+	 */
+	if (can_expand && !blocked && num_closid < (u32)mpam_partid_max + 1) {
+		resctrl_using_extra_partids = true;
+		resctrl_num_mon_partid = (u32)mpam_partid_max + 1;
+	} else {
+		resctrl_using_extra_partids = false;
+		resctrl_num_mon_partid = num_closid;
+	}
+
+	/* Tell the driver how the request PARTIDs map onto control groups. */
+	mpam_partid_map_init(resctrl_num_mon_partid, resctrl_num_closid);
+
+	pr_debug("PARTIDs: monitor=%u closid=%u extra=%u\n",
+		 resctrl_num_mon_partid, resctrl_num_closid,
+		 resctrl_using_extra_partids);
+}
+
 int mpam_resctrl_setup(void)
 {
 	int err = 0;
@@ -1978,6 +2095,9 @@ int mpam_resctrl_setup(void)
 	/* Find some classes to use for controls */
 	mpam_resctrl_pick_caches();
 	mpam_resctrl_pick_mba();
+
+	/* Decide how the request PARTIDs map onto the control groups */
+	mpam_resctrl_configure_partids();
 
 	/* Initialise the resctrl structures from the classes */
 	for_each_mpam_resctrl_control(res, rid) {
@@ -2005,17 +2125,32 @@ int mpam_resctrl_setup(void)
 		}
 	}
 
+	/*
+	 * The extra request PARTIDs only exist to provide monitoring groups.
+	 * Without a usable monitor there is nothing to gain, and deriving the
+	 * task's PARTID from an RMID that was never allocated would put every
+	 * control group on the same PARTID.
+	 */
+	if (resctrl_using_extra_partids && !resctrl_arch_mon_capable()) {
+		resctrl_using_extra_partids = false;
+		resctrl_num_mon_partid = resctrl_num_closid;
+		mpam_partid_map_init(resctrl_num_mon_partid, resctrl_num_closid);
+	}
+
 	cpus_read_unlock();
 
 	if (!resctrl_arch_alloc_capable() && !resctrl_arch_mon_capable()) {
 		pr_debug("No alloc(%u) or monitor(%u) found - resctrl not supported\n",
 			 resctrl_arch_alloc_capable(), resctrl_arch_mon_capable());
+		mpam_partid_map_exit();
 		return -EOPNOTSUPP;
 	}
 
 	err = resctrl_init();
-	if (err)
+	if (err) {
+		mpam_partid_map_exit();
 		return err;
+	}
 
 	WRITE_ONCE(resctrl_enabled, true);
 
@@ -2023,6 +2158,8 @@ int mpam_resctrl_setup(void)
 
 internal_error:
 	cpus_read_unlock();
+	/* mpam_disable() resets the RIS with the 1:1 mapping. */
+	mpam_partid_map_exit();
 	pr_debug("Internal error %d - resctrl not supported\n", err);
 	return err;
 }
@@ -2034,6 +2171,9 @@ void mpam_resctrl_exit(void)
 
 	WRITE_ONCE(resctrl_enabled, false);
 	resctrl_exit();
+
+	/* resctrl is gone: forget how the PARTIDs were grouped. */
+	mpam_partid_map_exit();
 }
 
 static void mpam_resctrl_teardown_mon(struct mpam_resctrl_mon *mon, struct mpam_class *class)

@@ -74,6 +74,18 @@ static DEFINE_SPINLOCK(partid_max_lock);
 static u32 mpam_num_closid;
 static u32 mpam_num_partid;
 
+void mpam_partid_map_init(u32 num_partid, u32 num_closid)
+{
+	mpam_num_partid = num_partid;
+	mpam_num_closid = num_closid;
+}
+
+void mpam_partid_map_exit(void)
+{
+	mpam_num_closid = 0;
+	mpam_num_partid = 0;
+}
+
 /*
  * Map a request PARTID onto its owning control group using modulo
  * interleaving. Without resctrl active, every PARTID maps 1:1 onto itself.
@@ -975,6 +987,9 @@ static void mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 	 * A RIS that implements PARTID narrowing has one configuration per
 	 * internal PARTID, and several request PARTIDs share it. Record both
 	 * limits in the resource properties.
+	 * Keep msc->partid_max at the full request PARTID range. The resctrl
+	 * glue code will broadcast a control group's configuration to every
+	 * request PARTID that maps onto that group's internal PARTID.
 	 */
 	props->partid_max = msc->partid_max;
 	props->intpartid_max = msc->partid_max;
@@ -985,7 +1000,6 @@ static void mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 
 		mpam_set_feature(mpam_feat_partid_nrw, props);
 		props->intpartid_max = min(props->intpartid_max, intpartid_max);
-		msc->partid_max = min(msc->partid_max, intpartid_max);
 	}
 }
 
@@ -1596,6 +1610,15 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 	if (mpam_has_feature(mpam_feat_partid_nrw, rprops)) {
 		/* Update the intpartid mapping */
 		u16 intpartid = mpam_partid_to_intpartid(partid);
+
+		/*
+		 * Without resctrl managing the mapping, the fallback maps
+		 * every PARTID 1:1, which can exceed the internal PARTID
+		 * range. Wrap onto an internal PARTID, like the narrowing
+		 * mapping resctrl programs.
+		 */
+		if (intpartid > rprops->intpartid_max)
+			intpartid %= (u32)rprops->intpartid_max + 1;
 
 		mpam_write_partsel_reg(msc, INTPARTID,
 				       MPAMCFG_INTPARTID_INTERNAL | intpartid);

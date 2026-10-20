@@ -1018,6 +1018,31 @@ void free_rmid_lru_list(void)
 	mutex_unlock(&rdtgroup_mutex);
 }
 
+/**
+ * resctrl_rmid_map_reinit() - Recompute every RMID's (CLOSID, RMID) pair.
+ *
+ * Some architectures derive the (CLOSID, RMID) pair from the index using
+ * state that only changes between mounts, such as CDP. Call this after that
+ * state changed. No RMID may be allocated, and none may be in limbo, so this
+ * is only safe while the filesystem is being mounted or has been torn down.
+ */
+void resctrl_rmid_map_reinit(void)
+{
+	struct rmid_entry *entry;
+	u32 idx, idx_limit;
+
+	lockdep_assert_held(&rdtgroup_mutex);
+
+	if (!rmid_ptrs)
+		return;
+
+	idx_limit = resctrl_arch_system_num_rmid_idx();
+	for (idx = 0; idx < idx_limit; idx++) {
+		entry = &rmid_ptrs[idx];
+		resctrl_arch_rmid_idx_decode(idx, &entry->closid, &entry->rmid);
+	}
+}
+
 #define MON_EVENT(_eventid, _name, _res, _fp)	\
 	[_eventid] = {				\
 	.name			= _name,	\
