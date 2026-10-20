@@ -608,19 +608,35 @@ static void mpam_ris_destroy(struct mpam_msc_ris *ris)
 	struct mpam_msc *msc = vmsc->msc;
 	struct mpam_component *comp = vmsc->comp;
 	struct mpam_class *class = comp->class;
+	struct mpam_msc_ris *tmp_ris;
+	struct mpam_vmsc *tmp_vmsc;
+	struct mpam_component *tmp_comp;
 
 	lockdep_assert_held(&mpam_list_lock);
 
-	/*
-	 * It is assumed affinities don't overlap. If they do the class becomes
-	 * unusable immediately.
-	 */
-	cpumask_andnot(&class->affinity, &class->affinity, &ris->affinity);
-	cpumask_andnot(&comp->affinity, &comp->affinity, &ris->affinity);
 	clear_bit(ris->ris_idx, &msc->ris_idxs);
 	list_del_rcu(&ris->msc_list);
 	list_del_rcu(&ris->vmsc_list);
 	add_to_garbage(ris);
+
+	/*
+	 * The affinity of a component or class is the union of the affinity
+	 * of every RIS it contains. RIS of different MSCs in the same
+	 * component can cover the same CPUs, so the destroyed RIS' affinity
+	 * can't just be removed: that would clear CPUs still covered by the
+	 * survivors. Recompute the union instead.
+	 */
+	cpumask_clear(&comp->affinity);
+	list_for_each_entry(tmp_vmsc, &comp->vmsc, comp_list) {
+		list_for_each_entry(tmp_ris, &tmp_vmsc->ris, vmsc_list)
+			cpumask_or(&comp->affinity, &comp->affinity,
+				   &tmp_ris->affinity);
+	}
+
+	cpumask_clear(&class->affinity);
+	list_for_each_entry(tmp_comp, &class->components, class_list)
+		cpumask_or(&class->affinity, &class->affinity,
+			   &tmp_comp->affinity);
 
 	if (list_empty(&vmsc->ris))
 		mpam_vmsc_destroy(vmsc);
@@ -1859,6 +1875,17 @@ static int mpam_discovery_cpu_online(unsigned int cpu)
 		return 0;
 
 	guard(srcu)(&mpam_srcu);
+	/*
+	 * Every firmware-described MSC failed to probe. There is nothing to
+	 * discover: report it instead of leaving the discovery callbacks
+	 * registered forever.
+	 */
+	if (list_empty(&mpam_all_msc)) {
+		mpam_disable_reason = "no MSC could be probed";
+		schedule_work(&mpam_broken_work);
+		return 0;
+	}
+
 	list_for_each_entry_srcu(msc, &mpam_all_msc, all_msc_list,
 				 srcu_read_lock_held(&mpam_srcu)) {
 		if (!cpumask_test_cpu(cpu, &msc->accessibility))
@@ -2017,6 +2044,19 @@ static void mpam_msc_destroy(struct mpam_msc *msc)
 	list_del_rcu(&msc->all_msc_list);
 	platform_set_drvdata(pdev, NULL);
 
+	/*
+	 * The error PPI, if it was requested, is freed by
+	 * mpam_unregister_irqs(). On the probe failure path it was never
+	 * requested and this is the only chance to release its dev_id.
+	 */
+	if (msc->error_dev_id && !msc->error_irq_req)
+		free_percpu(msc->error_dev_id);
+
+	mutex_destroy(&msc->probe_lock);
+	mutex_destroy(&msc->part_sel_lock);
+	mutex_destroy(&msc->error_irq_lock);
+	mutex_destroy(&msc->cfg_lock);
+
 	add_to_garbage(msc);
 }
 
@@ -2050,21 +2090,16 @@ static struct mpam_msc *do_mpam_msc_drv_probe(struct platform_device *pdev)
 	init_garbage(&msc->garbage);
 	msc->garbage.pdev = pdev;
 
-	err = devm_mutex_init(dev, &msc->probe_lock);
-	if (err)
-		return ERR_PTR(err);
-
-	err = devm_mutex_init(dev, &msc->part_sel_lock);
-	if (err)
-		return ERR_PTR(err);
-
-	err = devm_mutex_init(dev, &msc->error_irq_lock);
-	if (err)
-		return ERR_PTR(err);
-
-	err = devm_mutex_init(dev, &msc->cfg_lock);
-	if (err)
-		return ERR_PTR(err);
+	/*
+	 * These are plain mutexes, not devm ones: the msc can be freed by
+	 * mpam_msc_destroy() before the driver core releases the device's
+	 * managed resources. mpam_msc_destroy() destroys the mutexes before
+	 * freeing the memory.
+	 */
+	mutex_init(&msc->probe_lock);
+	mutex_init(&msc->part_sel_lock);
+	mutex_init(&msc->error_irq_lock);
+	mutex_init(&msc->cfg_lock);
 
 	mpam_mon_sel_lock_init(msc);
 	msc->id = pdev->id;
@@ -2075,7 +2110,12 @@ static struct mpam_msc *do_mpam_msc_drv_probe(struct platform_device *pdev)
 	update_msc_accessibility(msc);
 	if (cpumask_empty(&msc->accessibility)) {
 		dev_err_once(dev, "MSC is not accessible from any CPU!");
-		return ERR_PTR(-EINVAL);
+		/*
+		 * -ENODEV tells the caller this MSC can't be used, but it also
+		 * can't carry traffic from any CPU, so the remaining MSCs can
+		 * still be enabled.
+		 */
+		return ERR_PTR(-ENODEV);
 	}
 
 	err = mpam_msc_setup_error_irq(msc);
@@ -2094,11 +2134,13 @@ static struct mpam_msc *do_mpam_msc_drv_probe(struct platform_device *pdev)
 							    &msc_res);
 		if (IS_ERR(io)) {
 			dev_err_once(dev, "Failed to map MSC base address\n");
+			free_percpu(msc->error_dev_id);
 			return ERR_CAST(io);
 		}
 		msc->mapped_hwpage_sz = msc_res->end - msc_res->start;
 		msc->mapped_hwpage = io;
 	} else {
+		free_percpu(msc->error_dev_id);
 		return ERR_PTR(-EINVAL);
 	}
 
@@ -2110,6 +2152,9 @@ static struct mpam_msc *do_mpam_msc_drv_probe(struct platform_device *pdev)
 
 static int fw_num_msc;
 
+/* Ensures the discovery cpuhp callbacks are only registered once. */
+static atomic_t mpam_discovery_started = ATOMIC_INIT(0);
+
 static int mpam_msc_drv_probe(struct platform_device *pdev)
 {
 	int err;
@@ -2120,21 +2165,55 @@ static int mpam_msc_drv_probe(struct platform_device *pdev)
 	msc = do_mpam_msc_drv_probe(pdev);
 	mutex_unlock(&mpam_list_lock);
 
-	if (IS_ERR(msc))
-		return PTR_ERR(msc);
+	if (IS_ERR(msc)) {
+		err = PTR_ERR(msc);
+
+		/*
+		 * Firmware can describe an MSC that is not accessible from
+		 * any possible CPU, e.g. when the possible CPUs were
+		 * restricted by nr_cpus=. Such an MSC can't carry any CPU
+		 * traffic, so MPAM can still be enabled for the remaining
+		 * devices. Any other failure may leave an MSC that is in the
+		 * traffic path of the online CPUs unprobed, in which case the
+		 * safe PARTID and PMG limits are unknown: keep it fatal.
+		 */
+		if (err != -ENODEV)
+			return err;
+		goto count;
+	}
 
 	/* Create RIS entries described by firmware */
 	err = acpi_mpam_parse_resources(msc, plat_data);
 	if (err) {
 		mpam_msc_drv_remove(pdev);
+		/*
+		 * This MSC may still be in the traffic path of the online
+		 * CPUs and its PARTID and PMG limits were never read. Enabling
+		 * MPAM could then generate out of range values, so leave it
+		 * fatal as before.
+		 */
 		return err;
 	}
-
-	if (atomic_add_return(1, &mpam_num_msc) == fw_num_msc)
+count:
+	/*
+	 * A failed MSC must not prevent MPAM being enabled for the
+	 * surviving devices. Count it here too: otherwise the counter never
+	 * reaches fw_num_msc, the discovery cpuhp callbacks are never
+	 * registered and mpam_enable() is never scheduled - MPAM stays
+	 * dead system-wide, without any error message.
+	 *
+	 * A device that failed to probe stays unbound and can be re-probed
+	 * through /sys/bus/platform/drivers_probe. Use >= so that a second
+	 * count doesn't leave the counter above fw_num_msc, and only start
+	 * discovery once: re-registering would replace the runtime cpuhp
+	 * callbacks with the discovery ones.
+	 */
+	if (atomic_inc_return(&mpam_num_msc) >= fw_num_msc &&
+	    !atomic_xchg(&mpam_discovery_started, 1))
 		mpam_register_cpuhp_callbacks(mpam_discovery_cpu_online, NULL,
 					      "mpam:drv_probe");
 
-	return 0;
+	return err;
 }
 
 static struct platform_driver mpam_msc_driver = {
@@ -2590,6 +2669,8 @@ static void mpam_unregister_irqs(void)
 			if (irq_is_percpu(irq)) {
 				msc->reenable_error_ppi = 0;
 				free_percpu_irq(irq, msc->error_dev_id);
+				free_percpu(msc->error_dev_id);
+				msc->error_dev_id = NULL;
 			} else {
 				devm_free_irq(&msc->pdev->dev, irq, msc);
 			}
