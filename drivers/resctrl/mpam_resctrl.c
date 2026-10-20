@@ -62,6 +62,9 @@ static DEFINE_MUTEX(domain_list_lock);
  */
 static bool cdp_enabled;
 
+/* If resctrl is leveraging extra request PARTIDs for monitoring. */
+static bool resctrl_using_extra_partids;
+
 /*
  * We use cacheinfo to discover the size of the caches and their id. cacheinfo
  * populates this from a device_initcall(). mpam_resctrl_setup() must wait.
@@ -274,8 +277,37 @@ u32 resctrl_arch_system_num_rmid_idx(void)
 	return (mpam_pmg_max + 1) * (mpam_partid_max + 1);
 }
 
+/* The request PARTID and PMG a resctrl RMID maps onto. */
+static u16 resctrl_rmid_to_partid(u32 rmid)
+{
+	return rmid / (mpam_pmg_max + 1);
+}
+
+static u8 resctrl_rmid_to_pmg(u32 rmid)
+{
+	return rmid % (mpam_pmg_max + 1);
+}
+
+/*
+ * The index of a monitor in mbwu_idx_to_mon[]: one entry per request PARTID
+ * and PMG. With CDP the code and data request PARTIDs have separate entries.
+ */
+static u32 resctrl_mbwu_idx(u32 partid, u8 pmg)
+{
+	return partid * (mpam_pmg_max + 1) + pmg;
+}
+
+/* The control group that owns a request PARTID. */
+static u16 resctrl_partid_to_closid(u16 partid)
+{
+	return mpam_partid_to_intpartid(partid);
+}
+
 u32 resctrl_arch_rmid_idx_encode(u32 closid, u32 rmid)
 {
+	if (resctrl_using_extra_partids)
+		return rmid;
+
 	return closid * (mpam_pmg_max + 1) + rmid;
 }
 
@@ -287,8 +319,18 @@ bool resctrl_arch_rmid_idx_match(u32 closid, u32 rmid_closid)
 
 void resctrl_arch_rmid_idx_decode(u32 idx, u32 *closid, u32 *rmid)
 {
-	*closid = idx / (mpam_pmg_max + 1);
-	*rmid = idx % (mpam_pmg_max + 1);
+	if (resctrl_using_extra_partids) {
+		if (rmid)
+			*rmid = idx;
+		if (closid)
+			*closid = resctrl_partid_to_closid(resctrl_rmid_to_partid(idx));
+		return;
+	}
+
+	if (closid)
+		*closid = idx / (mpam_pmg_max + 1);
+	if (rmid)
+		*rmid = idx % (mpam_pmg_max + 1);
 }
 
 void resctrl_arch_sched_in(struct task_struct *tsk)
@@ -303,19 +345,35 @@ static void resctrl_closid_rmid_to_partid_pmg(u32 closid, u32 rmid,
 					      u8 *pmg_d, u8 *pmg_i)
 {
 	WARN_ON_ONCE(closid > U16_MAX);
-	WARN_ON_ONCE(rmid > U8_MAX);
+	WARN_ON_ONCE(!resctrl_using_extra_partids && rmid > U8_MAX);
 
 	if (!cdp_enabled) {
-		*partid_d = *partid_i = closid;
-		*pmg_d = *pmg_i = rmid;
+		u16 partid;
+		u8 pmg;
+
+		if (resctrl_using_extra_partids) {
+			partid = resctrl_rmid_to_partid(rmid);
+			pmg = resctrl_rmid_to_pmg(rmid);
+		} else {
+			partid = closid;
+			pmg = rmid;
+		}
+
+		*partid_d = *partid_i = partid;
+		*pmg_d = *pmg_i = pmg;
 	} else {
-		/*
-		 * When CDP is enabled, resctrl halves the closid range and we
-		 * use odd/even partid for one closid.
-		 */
-		*partid_d = resctrl_get_config_index(closid, CDP_DATA);
-		*partid_i = resctrl_get_config_index(closid, CDP_CODE);
-		*pmg_d = *pmg_i = rmid;
+		if (resctrl_using_extra_partids) {
+			u16 req_partid = resctrl_rmid_to_partid(rmid);
+			u8 pmg = resctrl_rmid_to_pmg(rmid);
+
+			*partid_d = resctrl_get_config_index(req_partid, CDP_DATA);
+			*partid_i = resctrl_get_config_index(req_partid, CDP_CODE);
+			*pmg_d = *pmg_i = pmg;
+		} else {
+			*partid_d = resctrl_get_config_index(closid, CDP_DATA);
+			*partid_i = resctrl_get_config_index(closid, CDP_CODE);
+			*pmg_d = *pmg_i = rmid;
+		}
 	}
 }
 
@@ -356,6 +414,14 @@ void resctrl_arch_set_closid_rmid(struct task_struct *tsk, u32 closid, u32 rmid)
 /* Does the request PARTID belong to this control group? */
 static bool resctrl_partid_in_closid(u16 partid, u32 closid)
 {
+	/*
+	 * Translate the request PARTID to its internal PARTID first, then
+	 * halve it for CDP. Doing it the other way round wraps the upper
+	 * odd internal PARTIDs and maps them to the wrong control group.
+	 */
+	if (resctrl_using_extra_partids)
+		partid = mpam_partid_to_intpartid(partid);
+
 	if (cdp_enabled)
 		partid >>= 1;
 
@@ -488,7 +554,8 @@ static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_c
 	partid = (cdp_type == CDP_CODE) ? partid_i : partid_d;
 
 	if (mon_idx == USE_PRE_ALLOCATED) {
-		int mbwu_idx = resctrl_arch_rmid_idx_encode(partid, rmid);
+		u8 pmg = (cdp_type == CDP_CODE) ? pmg_i : pmg_d;
+		int mbwu_idx = resctrl_mbwu_idx(partid, pmg);
 
 		mon_idx = mon->mbwu_idx_to_mon[mbwu_idx];
 		if (mon_idx == -1)
@@ -598,13 +665,19 @@ static void __reset_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon
 	if (!mpam_is_enabled())
 		return;
 
-	/* Shift closid to account for CDP */
-	closid = resctrl_get_config_index(closid, cdp_type);
-
 	if (mon_idx == USE_PRE_ALLOCATED) {
-		int mbwu_idx = resctrl_arch_rmid_idx_encode(closid, rmid);
+		u32 partid_d, partid_i;
+		u8 pmg_d, pmg_i;
 
-		mon_idx = mon->mbwu_idx_to_mon[mbwu_idx];
+		resctrl_closid_rmid_to_partid_pmg(closid, rmid, &partid_d,
+						  &partid_i, &pmg_d, &pmg_i);
+
+		if (cdp_type == CDP_CODE)
+			mon_idx = mon->mbwu_idx_to_mon[resctrl_mbwu_idx(partid_i,
+									pmg_i)];
+		else
+			mon_idx = mon->mbwu_idx_to_mon[resctrl_mbwu_idx(partid_d,
+									pmg_d)];
 	}
 
 	if (mon_idx == -1)
@@ -1185,10 +1258,16 @@ static void __config_cntr(struct mpam_resctrl_mon *mon, u32 cntr_id,
 			  bool assign)
 {
 	/* Same CDP index remap as closid; maps cntr_id to assigned_counters[]. */
-	u32 mbwu_idx, mon_idx = resctrl_get_config_index(cntr_id, cdp_type);
+	u32 partid_d, partid_i, mbwu_idx;
+	u32 mon_idx = resctrl_get_config_index(cntr_id, cdp_type);
+	u8 pmg_d, pmg_i;
 
-	closid = resctrl_get_config_index(closid, cdp_type);
-	mbwu_idx = resctrl_arch_rmid_idx_encode(closid, rmid);
+	resctrl_closid_rmid_to_partid_pmg(closid, rmid, &partid_d, &partid_i,
+					  &pmg_d, &pmg_i);
+	if (cdp_type == CDP_CODE)
+		mbwu_idx = resctrl_mbwu_idx(partid_i, pmg_i);
+	else
+		mbwu_idx = resctrl_mbwu_idx(partid_d, pmg_d);
 
 	if (assign)
 		mon->mbwu_idx_to_mon[mbwu_idx] = mon->assigned_counters[mon_idx];
