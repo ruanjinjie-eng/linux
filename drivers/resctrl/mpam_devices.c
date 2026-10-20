@@ -86,6 +86,13 @@ void mpam_partid_map_exit(void)
 	mpam_num_partid = 0;
 }
 
+/* Used by the KUnit tests to restore the live mapping after poking it. */
+void mpam_partid_map_get(u32 *num_partid, u32 *num_closid)
+{
+	*num_partid = mpam_num_partid;
+	*num_closid = mpam_num_closid;
+}
+
 /*
  * Map a request PARTID onto its owning control group using modulo
  * interleaving. Without resctrl active, every PARTID maps 1:1 onto itself.

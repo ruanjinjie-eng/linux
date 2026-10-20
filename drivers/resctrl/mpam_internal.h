@@ -480,6 +480,7 @@ extern u8 mpam_pmg_max;
 u16 mpam_partid_to_intpartid(u16 partid);
 void mpam_partid_map_init(u32 num_partid, u32 num_closid);
 void mpam_partid_map_exit(void);
+void mpam_partid_map_get(u32 *num_partid, u32 *num_closid);
 
 /* Scheduled work callback to enable mpam once all MSC have been probed */
 void mpam_enable(struct work_struct *work);
