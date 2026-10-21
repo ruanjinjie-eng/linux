@@ -189,8 +189,9 @@ static void mpam_resctrl_monitor_sync_abmc_vals(struct rdt_resource *l3)
 int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 {
 	u32 partid_i = RESCTRL_RESERVED_CLOSID, partid_d = RESCTRL_RESERVED_CLOSID;
-	struct mpam_resctrl_res *res = &mpam_resctrl_controls[RDT_RESOURCE_L3];
-	struct rdt_resource *l3 = &res->resctrl_res;
+	struct rdt_resource *l3 = &mpam_resctrl_controls[RDT_RESOURCE_L3].resctrl_res;
+	struct mpam_resctrl_res *res;
+	enum resctrl_res_level i;
 	int cpu;
 
 	if (!IS_ENABLED(CONFIG_EXPERT) && enable) {
@@ -212,10 +213,22 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 	cdp_enabled = enable;
 	mpam_resctrl_controls[rid].cdp_enabled = enable;
 
-	if (enable)
-		l3->mon.num_rmid = resctrl_arch_system_num_rmid_idx() / 2;
-	else
-		l3->mon.num_rmid = resctrl_arch_system_num_rmid_idx();
+	/*
+	 * CDP emulation consumes two PARTIDs per closid, halving the PARTIDs
+	 * available for monitoring - no matter which resource the mount
+	 * option was for. Update num_rmid for all mon_capable resources,
+	 * e.g. the L2 monitors as well as the L3.
+	 */
+	for_each_mpam_resctrl_control(res, i) {
+		struct rdt_resource *r = &res->resctrl_res;
+
+		if (!r->mon_capable)
+			continue;
+
+		r->mon.num_rmid = resctrl_arch_system_num_rmid_idx();
+		if (enable)
+			r->mon.num_rmid /= 2;
+	}
 
 	/* The mbw_max feature can't hide cdp as it's a per-partid maximum. */
 	if (cdp_enabled && !mpam_resctrl_controls[RDT_RESOURCE_MBA].cdp_enabled)
