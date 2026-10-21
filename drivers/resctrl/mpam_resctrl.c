@@ -412,6 +412,7 @@ static int resctrl_arch_mon_ctx_alloc_no_wait(enum resctrl_event_id evtid,
 
 	switch (evtid) {
 	case QOS_L3_OCCUP_EVENT_ID:
+	case QOS_L2_OCCUP_EVENT_ID:
 		/* With CDP, one monitor gets used for both code/data reads */
 		mon_ctx[MON_CTX_DATA] = mpam_alloc_csu_mon(mon->class);
 		mon_ctx[MON_CTX_CODE] = mon_ctx[MON_CTX_DATA];
@@ -422,6 +423,31 @@ static int resctrl_arch_mon_ctx_alloc_no_wait(enum resctrl_event_id evtid,
 		mon_ctx[MON_CTX_DATA] = USE_PRE_ALLOCATED;
 		mon_ctx[MON_CTX_CODE] = USE_PRE_ALLOCATED;
 		return USE_PRE_ALLOCATED;
+	case QOS_L2_MBM_CORE_EVENT_ID:
+		/*
+		 * The L2 event is not part of resctrl's L3 MBM event range,
+		 * so the assignable-counter machinery never applies: borrow a
+		 * bandwidth monitor for the duration of the read, like the
+		 * occupancy events do with CSU monitors. With CDP, borrow one
+		 * monitor per partid so code and data both accumulate.
+		 */
+		mon_ctx[MON_CTX_DATA] = mpam_alloc_mbwu_mon(mon->class);
+		if (mon_ctx[MON_CTX_DATA] < 0)
+			return mon_ctx[MON_CTX_DATA];
+
+		if (!cdp_enabled) {
+			mon_ctx[MON_CTX_CODE] = mon_ctx[MON_CTX_DATA];
+			return mon_ctx[MON_CTX_DATA];
+		}
+
+		mon_ctx[MON_CTX_CODE] = mpam_alloc_mbwu_mon(mon->class);
+		if (mon_ctx[MON_CTX_CODE] < 0) {
+			int err = mon_ctx[MON_CTX_CODE];
+
+			mpam_free_mbwu_mon(mon->class, mon_ctx[MON_CTX_DATA]);
+			return err;
+		}
+		return mon_ctx[MON_CTX_DATA];
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -460,8 +486,24 @@ static void resctrl_arch_mon_ctx_free_no_wait(enum resctrl_event_id evtid,
 	if (!mon->class)
 		return;
 
-	if (evtid == QOS_L3_OCCUP_EVENT_ID)
+	switch (evtid) {
+	case QOS_L3_OCCUP_EVENT_ID:
+	case QOS_L2_OCCUP_EVENT_ID:
+		/* With CDP, one monitor is used for both code/data reads */
 		mpam_free_csu_mon(mon->class, mon_ctx[MON_CTX_DATA]);
+		break;
+	case QOS_L3_MBM_LOCAL_EVENT_ID:
+	case QOS_L3_MBM_TOTAL_EVENT_ID:
+		/* Served by the pre-assigned ABMC counters */
+		break;
+	case QOS_L2_MBM_CORE_EVENT_ID:
+		mpam_free_mbwu_mon(mon->class, mon_ctx[MON_CTX_DATA]);
+		if (mon_ctx[MON_CTX_CODE] != mon_ctx[MON_CTX_DATA])
+			mpam_free_mbwu_mon(mon->class, mon_ctx[MON_CTX_CODE]);
+		break;
+	default:
+		break;
+	}
 
 	wake_up(&resctrl_mon_ctx_waiters);
 }
@@ -557,10 +599,22 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 	l3_dom = container_of(hdr, struct mpam_resctrl_dom, resctrl_mon_dom.hdr);
 	mon_comp = l3_dom->mon_comp[eventid];
 
-	if (eventid != QOS_L3_OCCUP_EVENT_ID)
+	switch (eventid) {
+	case QOS_L3_OCCUP_EVENT_ID:
+	case QOS_L2_OCCUP_EVENT_ID:
+		mon_type = mpam_feat_msmon_csu;
+		break;
+	case QOS_L2_MBM_CORE_EVENT_ID:
+		/*
+		 * Served by a bandwidth monitor borrowed for the read via
+		 * resctrl_arch_mon_ctx_alloc(); the L3 MBWU events use the
+		 * ABMC resctrl_arch_cntr_read() path instead.
+		 */
+		mon_type = mpam_feat_msmon_mbwu;
+		break;
+	default:
 		return -EINVAL;
-
-	mon_type = mpam_feat_msmon_csu;
+	}
 
 	return read_mon_cdp_safe(mon, mon_comp, mon_type, arch_mon_ctx,
 				 closid, rmid, val);
