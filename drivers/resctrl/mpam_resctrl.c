@@ -37,15 +37,16 @@ static struct mpam_resctrl_res mpam_resctrl_controls[RDT_NUM_RESOURCES];
 	     rid++, res = &mpam_resctrl_controls[rid])
 
 /*
- * The classes we've picked to map to resctrl events.
- * Resctrl believes all the worlds a Xeon, and these are all on the L3. This
- * array lets us find the actual class backing the event counters. e.g.
- * the only memory bandwidth counters may be on the memory controller, but to
- * make use of them, we pretend they are on L3. Restrict the events considered
- * to those supported by MPAM.
+ * The classes we've picked to map to resctrl events, indexed by event id.
+ * This array lets us find the actual class backing the event counters: the
+ * L2 events use the L2 class, while the L3 bandwidth counters may sit on the
+ * memory controller or another class close to the L3.
+ *
+ * The range also covers QOS_L3_MBM_LOCAL_EVENT_ID, which is left classless:
+ * MPAM cannot distinguish local from remote traffic.
  * Class pointer may be NULL.
  */
-#define MPAM_MAX_EVENT QOS_L3_MBM_TOTAL_EVENT_ID
+#define MPAM_MAX_EVENT QOS_L2_MBM_CORE_EVENT_ID
 static struct mpam_resctrl_mon mpam_resctrl_counters[MPAM_MAX_EVENT + 1];
 
 #define for_each_mpam_resctrl_mon(mon, eventid)					\
@@ -93,7 +94,10 @@ bool resctrl_arch_mon_capable(void)
 	struct mpam_resctrl_res *res = &mpam_resctrl_controls[RDT_RESOURCE_L3];
 	struct rdt_resource *l3 = &res->resctrl_res;
 
-	/* All monitors are presented as being on the L3 cache */
+	/*
+	 * resctrl monitoring is anchored on the L3 group; L2 monitors are
+	 * additional resources, and monitor-only platforms fake the L3 group.
+	 */
 	return l3->mon_capable;
 }
 
@@ -1128,9 +1132,13 @@ static void mpam_resctrl_pick_counters(void)
 	guard(srcu)(&mpam_srcu);
 	list_for_each_entry_srcu(class, &mpam_classes, classes_list,
 				 srcu_read_lock_held(&mpam_srcu)) {
-		/* The name of the resource is L3... */
-		if (class->type == MPAM_CLASS_CACHE && class->level != 3) {
-			pr_debug("class %u is a cache but not the L3", class->level);
+		/*
+		 * Cache counters are presented as the L2 or L3 resource,
+		 * matching the cache the MSCs were built with.
+		 */
+		if (class->type == MPAM_CLASS_CACHE && class->level != 2 &&
+		    class->level != 3) {
+			pr_debug("class %u is a cache but not L2 or L3", class->level);
 			continue;
 		}
 
@@ -1150,7 +1158,10 @@ static void mpam_resctrl_pick_counters(void)
 				if (update_rmid_limits(class))
 					break;
 
-				counter_update_class(QOS_L3_OCCUP_EVENT_ID, class);
+				counter_update_class(class->level == 2 ?
+						     QOS_L2_OCCUP_EVENT_ID :
+						     QOS_L3_OCCUP_EVENT_ID,
+						     class);
 				break;
 			default:
 				break;
@@ -1173,6 +1184,19 @@ static void mpam_resctrl_pick_counters(void)
 			 * mbm_total.
 			 */
 			counter_update_class(QOS_L3_MBM_TOTAL_EVENT_ID, class);
+		}
+
+		/*
+		 * An L2 MSC measures the bandwidth of the traffic its cache
+		 * sees from the CPUs that share it, which is what resctrl
+		 * presents as the per-L2 mbm_core_bytes event.
+		 */
+		if (class->type == MPAM_CLASS_CACHE && class->level == 2 &&
+		    class_has_usable_mbwu(class)) {
+			pr_debug("class %u has usable MBWU for the L2 resource\n",
+				 class->level);
+
+			counter_update_class(QOS_L2_MBM_CORE_EVENT_ID, class);
 		}
 	}
 }
