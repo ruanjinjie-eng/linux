@@ -321,6 +321,8 @@ struct mpam_config {
 	u16	mbw_max;
 	u16	mbw_min;
 	bool	max_limit;
+	u16	cmax;
+	u16	cmin;
 
 	struct mpam_garbage	garbage;
 };
