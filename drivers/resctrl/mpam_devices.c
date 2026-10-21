@@ -803,6 +803,8 @@ static void mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 		u32 ccap_features = mpam_read_partsel_reg(msc, CCAP_IDR);
 
 		props->cmax_wd = FIELD_GET(MPAMF_CCAP_IDR_CMAX_WD, ccap_features);
+		/* As with bwa_wd, the field reports a 16-bit register field */
+		props->cmax_wd = min(props->cmax_wd, 16);
 		if (props->cmax_wd &&
 		    FIELD_GET(MPAMF_CCAP_IDR_HAS_CMAX_SOFTLIM, ccap_features))
 			mpam_set_feature(mpam_feat_cmax_softlim, props);
