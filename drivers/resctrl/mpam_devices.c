@@ -848,8 +848,11 @@ static void mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 		 */
 		props->bwa_wd = min(props->bwa_wd, 16);
 
-		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MAX, mbw_features))
+		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MAX, mbw_features)) {
 			mpam_set_feature(mpam_feat_mbw_max, props);
+			/* The hard-limit bit is a config bit, not a capability */
+			mpam_set_feature(mpam_feat_max_limit, props);
+		}
 
 		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MIN, mbw_features))
 			mpam_set_feature(mpam_feat_mbw_min, props);
@@ -1586,6 +1589,9 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 	if (mpam_has_feature(mpam_feat_mbw_min, rprops)) {
 		u16 val = 0;
 
+		if (mpam_has_feature(mpam_feat_mbw_min, cfg))
+			val = cfg->mbw_min;
+
 		if (mpam_has_quirk(T241_FORCE_MBW_MIN_TO_ONE, msc)) {
 			u16 min = mpam_wa_t241_force_mbw_min_to_one(rprops);
 
@@ -1597,10 +1603,19 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 	}
 
 	if (mpam_has_feature(mpam_feat_mbw_max, rprops)) {
+		u32 val = MPAMCFG_MBW_MAX_MAX;
+
 		if (mpam_has_feature(mpam_feat_mbw_max, cfg))
-			mpam_write_partsel_reg(msc, MBW_MAX, cfg->mbw_max);
-		else
-			mpam_write_partsel_reg(msc, MBW_MAX, MPAMCFG_MBW_MAX_MAX);
+			val = cfg->mbw_max;
+
+		/*
+		 * The hard-limit bit follows its own feature bit: MBHDL can
+		 * be configured without MBW_MAX ever being written.
+		 */
+		if (mpam_has_feature(mpam_feat_max_limit, cfg) && cfg->max_limit)
+			val |= MPAMCFG_MBW_MAX_HARDLIM;
+
+		mpam_write_partsel_reg(msc, MBW_MAX, val);
 	}
 
 	if (mpam_has_feature(mpam_feat_mbw_prop, rprops))
@@ -2922,6 +2937,8 @@ static bool mpam_update_config(struct mpam_config *cfg,
 	maybe_update_config(cfg, mpam_feat_cpor_part, newcfg, cpbm, has_changes);
 	maybe_update_config(cfg, mpam_feat_mbw_part, newcfg, mbw_pbm, has_changes);
 	maybe_update_config(cfg, mpam_feat_mbw_max, newcfg, mbw_max, has_changes);
+	maybe_update_config(cfg, mpam_feat_mbw_min, newcfg, mbw_min, has_changes);
+	maybe_update_config(cfg, mpam_feat_max_limit, newcfg, max_limit, has_changes);
 
 	return has_changes;
 }
