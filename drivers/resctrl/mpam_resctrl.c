@@ -1336,26 +1336,47 @@ static int mpam_resctrl_monitor_init_abmc(struct mpam_resctrl_mon *mon)
 static int mpam_resctrl_monitor_init(struct mpam_resctrl_mon *mon,
 				     enum resctrl_event_id type)
 {
-	struct mpam_resctrl_res *res = &mpam_resctrl_controls[RDT_RESOURCE_L3];
-	struct rdt_resource *l3 = &res->resctrl_res;
+	enum resctrl_res_level res_level;
+	struct mpam_resctrl_res *res;
+	struct rdt_resource *r;
+	int cache_level;
 
 	lockdep_assert_cpus_held();
 
+	switch (type) {
+	case QOS_L2_OCCUP_EVENT_ID:
+	case QOS_L2_MBM_CORE_EVENT_ID:
+		cache_level = 2;
+		res_level = RDT_RESOURCE_L2;
+		break;
+	case QOS_L3_OCCUP_EVENT_ID:
+	case QOS_L3_MBM_LOCAL_EVENT_ID:
+	case QOS_L3_MBM_TOTAL_EVENT_ID:
+		cache_level = 3;
+		res_level = RDT_RESOURCE_L3;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	res = &mpam_resctrl_controls[res_level];
+	r = &res->resctrl_res;
+
 	/*
-	 * There also needs to be an L3 cache present.
+	 * There also needs to be a cache at the level we're describing.
 	 * The check just requires any online CPU and it can't go offline as we
 	 * hold the cpu lock.
 	 */
-	if (get_cpu_cacheinfo_id(raw_smp_processor_id(), 3) == -1)
+	if (get_cpu_cacheinfo_id(raw_smp_processor_id(), cache_level) == -1)
 		return 0;
 
 	/*
-	 * If there are no MPAM resources on L3, force it into existence.
-	 * topology_matches_l3() already ensures this looks like the L3.
-	 * The domain-ids will be fixed up by mpam_resctrl_domain_hdr_init().
+	 * If there are no MPAM resources at this level, force it into
+	 * existence so the counters have somewhere to live. The domain-ids
+	 * will be fixed up by mpam_resctrl_domain_hdr_init().
 	 */
 	if (!res->class) {
-		pr_warn_once("Faking L3 MSC to enable counters.\n");
+		pr_warn_once("Faking L%d MSC to enable counters.\n", cache_level);
 		res->class = mpam_resctrl_counters[type].class;
 	}
 
@@ -1364,8 +1385,13 @@ static int mpam_resctrl_monitor_init(struct mpam_resctrl_mon *mon,
 	 * monitoring class.
 	 * Setting name is necessary on monitor only platforms.
 	 */
-	l3->name = "L3";
-	l3->mon_scope = RESCTRL_L3_CACHE;
+	if (cache_level == 3) {
+		r->name = "L3";
+		r->mon_scope = RESCTRL_L3_CACHE;
+	} else {
+		r->name = "L2";
+		r->mon_scope = RESCTRL_L2_CACHE;
+	}
 
 	/*
 	 * num-rmid is the upper bound for the number of monitoring groups that
@@ -1375,7 +1401,7 @@ static int mpam_resctrl_monitor_init(struct mpam_resctrl_mon *mon,
 	 * this does mean userspace needs to know the architecture to correctly
 	 * interpret this value.
 	 */
-	l3->mon.num_rmid = resctrl_arch_system_num_rmid_idx();
+	r->mon.num_rmid = resctrl_arch_system_num_rmid_idx();
 
 	if (type == QOS_L3_MBM_TOTAL_EVENT_ID) {
 		int err;
@@ -1385,13 +1411,13 @@ static int mpam_resctrl_monitor_init(struct mpam_resctrl_mon *mon,
 			return err;
 
 		static_assert(MAX_EVT_CONFIG_BITS == 0x7f);
-		l3->mon.mbm_cfg_mask = MAX_EVT_CONFIG_BITS;
+		r->mon.mbm_cfg_mask = MAX_EVT_CONFIG_BITS;
 	}
 
 	if (!resctrl_enable_mon_event(type, false, 0, NULL))
 		return -EINVAL;
 
-	l3->mon_capable = true;
+	r->mon_capable = true;
 
 	return 0;
 }
