@@ -2897,8 +2897,15 @@ void mpam_enable(struct work_struct *work)
 		mpam_enable_once();
 }
 
+/*
+ * Adopting a feature is itself a change: 0 is a valid value for several
+ * controls, and writing it must reprogram the reset value, not just merge
+ * the (equal) number.
+ */
 #define maybe_update_config(cfg, feature, newcfg, member, changes) do { \
-	if (mpam_has_feature(feature, newcfg) &&			\
+	if (!mpam_has_feature(feature, newcfg))			\
+		break;							\
+	if (!mpam_has_feature(feature, cfg) ||			\
 	    (newcfg)->member != (cfg)->member) {			\
 		(cfg)->member = (newcfg)->member;			\
 		mpam_set_feature(feature, cfg);				\
