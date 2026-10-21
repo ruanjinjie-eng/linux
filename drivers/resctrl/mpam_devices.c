@@ -1648,6 +1648,9 @@ static void mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 			if (!mpam_has_feature(mpam_feat_intpri_part_0_low, rprops))
 				intpri = 0;
 
+			if (mpam_has_feature(mpam_feat_intpri_part, cfg))
+				intpri = cfg->intpri;
+
 			pri_val |= FIELD_PREP(MPAMCFG_PRI_INTPRI, intpri);
 		}
 		if (mpam_has_feature(mpam_feat_dspri_part, rprops)) {
@@ -2948,6 +2951,7 @@ static bool mpam_update_config(struct mpam_config *cfg,
 	maybe_update_config(cfg, mpam_feat_max_limit, newcfg, max_limit, has_changes);
 	maybe_update_config(cfg, mpam_feat_cmax_cmax, newcfg, cmax, has_changes);
 	maybe_update_config(cfg, mpam_feat_cmax_cmin, newcfg, cmin, has_changes);
+	maybe_update_config(cfg, mpam_feat_intpri_part, newcfg, intpri, has_changes);
 
 	return has_changes;
 }

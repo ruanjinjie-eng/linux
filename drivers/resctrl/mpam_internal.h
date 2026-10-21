@@ -324,6 +324,9 @@ struct mpam_config {
 	u16	cmax;
 	u16	cmin;
 
+	/* Internal priority */
+	u16	intpri;
+
 	struct mpam_garbage	garbage;
 };
 
