@@ -299,6 +299,11 @@ unsigned int __weak arch_get_system_nr_ranges(void)
 			continue;
 		nr_ranges++;
 	}
+
+	/* Memory hot-unplug may cause range split. So add an extra slot here. */
+	if (IS_ENABLED(CONFIG_CRASH_HOTPLUG))
+		nr_ranges++;
+
 	return nr_ranges;
 }
 
