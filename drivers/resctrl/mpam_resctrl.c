@@ -999,6 +999,9 @@ static void mpam_resctrl_pick_caches(void)
 		if (mpam_has_feature(mpam_feat_cmax_cmin, &class->props))
 			mpam_resctrl_controls[class->level == 2 ?
 					RDT_RESOURCE_L2_MIN : RDT_RESOURCE_L3_MIN].class = class;
+		if (mpam_has_feature(mpam_feat_intpri_part, &class->props))
+			mpam_resctrl_controls[class->level == 2 ?
+					RDT_RESOURCE_L2_PRI : RDT_RESOURCE_L3_PRI].class = class;
 	}
 }
 
@@ -1053,10 +1056,16 @@ static void mpam_resctrl_pick_mba(void)
 	}
 
 	if (candidate_class) {
+		struct mpam_props *cprops = &candidate_class->props;
+
 		pr_debug("selected class %u to back MBA\n",
 			 candidate_class->level);
 		res = &mpam_resctrl_controls[RDT_RESOURCE_MBA];
 		res->class = candidate_class;
+
+		/* As with the caches, re-use the class for the pseudo resources */
+		if (mpam_has_feature(mpam_feat_intpri_part, cprops))
+			mpam_resctrl_controls[RDT_RESOURCE_MB_PRI].class = candidate_class;
 	}
 }
 
@@ -1308,6 +1317,23 @@ static int mpam_resctrl_control_init(struct mpam_resctrl_res *res)
 		r->name = (r->rid == RDT_RESOURCE_L2_MIN) ? "L2MIN" : "L3MIN";
 		r->alloc_capable = true;
 		break;
+	case RDT_RESOURCE_L3_PRI:
+	case RDT_RESOURCE_L2_PRI:
+	case RDT_RESOURCE_MB_PRI:
+		r->schema_fmt = RESCTRL_SCHEMA_RANGE;
+		r->ctrl_scope = (r->rid == RDT_RESOURCE_L2_PRI) ?
+			RESCTRL_L2_CACHE : RESCTRL_L3_CACHE;
+
+		r->membw.delay_linear = true;
+		r->membw.throttle_mode = THREAD_THROTTLE_UNDEFINED;
+		r->membw.min_bw = 0;
+		r->membw.max_bw = GENMASK(cprops->intpri_wd - 1, 0);
+		r->membw.bw_gran = 1;
+
+		r->name = (r->rid == RDT_RESOURCE_MB_PRI) ? "MBPRI" :
+			((r->rid == RDT_RESOURCE_L2_PRI) ? "L2PRI" : "L3PRI");
+		r->alloc_capable = true;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -1480,6 +1506,11 @@ u32 resctrl_arch_get_config(struct rdt_resource *r, struct rdt_ctrl_domain *d,
 	case RDT_RESOURCE_L2_MIN:
 		configured_by = mpam_feat_cmax_cmin;
 		break;
+	case RDT_RESOURCE_L3_PRI:
+	case RDT_RESOURCE_L2_PRI:
+	case RDT_RESOURCE_MB_PRI:
+		configured_by = mpam_feat_intpri_part;
+		break;
 	case RDT_RESOURCE_MBA:
 		if (mpam_has_feature(mpam_feat_mbw_max, cprops)) {
 			configured_by = mpam_feat_mbw_max;
@@ -1501,6 +1532,8 @@ u32 resctrl_arch_get_config(struct rdt_resource *r, struct rdt_ctrl_domain *d,
 		return ca_max_to_percent(cfg->cmax, cprops);
 	case mpam_feat_cmax_cmin:
 		return ca_max_to_percent(cfg->cmin, cprops);
+	case mpam_feat_intpri_part:
+		return cfg->intpri;
 	case mpam_feat_mbw_max:
 		return mbw_max_to_percent(cfg->mbw_max, cprops);
 	default:
@@ -1562,6 +1595,12 @@ int resctrl_arch_update_one(struct rdt_resource *r, struct rdt_ctrl_domain *d,
 	case RDT_RESOURCE_L2_MIN:
 		cfg.cmin = percent_to_ca_max(cfg_val, cprops);
 		mpam_set_feature(mpam_feat_cmax_cmin, &cfg);
+		break;
+	case RDT_RESOURCE_L3_PRI:
+	case RDT_RESOURCE_L2_PRI:
+	case RDT_RESOURCE_MB_PRI:
+		cfg.intpri = cfg_val;
+		mpam_set_feature(mpam_feat_intpri_part, &cfg);
 		break;
 	case RDT_RESOURCE_MBA:
 		if (mpam_has_feature(mpam_feat_mbw_max, cprops)) {
