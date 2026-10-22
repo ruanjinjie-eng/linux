@@ -65,8 +65,57 @@ static bool cdp_enabled;
 static u32 resctrl_num_closid = 1;
 static u32 resctrl_num_mon_partid = 1;
 
+/*
+ * How the flat monitoring index and the request PARTIDs map onto the CLOSID
+ * space. These are calculated when the PARTID split is chosen, and whenever
+ * CDP changes, so the hot paths only do arithmetic. The relations are:
+ *
+ *	CLOSID = (request PARTID % mod) / per_closid
+ *	CLOSID = monitoring group % group_mod
+ *
+ * where @per_closid is 2 when CDP gives each control group a (data, code)
+ * pair of internal PARTIDs, and 1 otherwise.
+ */
+static u32 resctrl_intpartid_mod = 1;
+static u32 resctrl_intpartid_per_closid = 1;
+static u32 resctrl_mon_group_mod = 1;
+static u32 resctrl_num_mon_groups = 1;
+
 /* If resctrl is leveraging extra request PARTIDs for monitoring. */
 static bool resctrl_using_extra_partids;
+
+/*
+ * Recalculate how the flat monitoring index and the request PARTIDs map onto
+ * the CLOSID space. This is called when the PARTID split is chosen, and
+ * whenever CDP changes.
+ *
+ * The request PARTIDs and RMIDs stay dependent on the CLOSID allocator: the
+ * flat RMID index is decoded into exactly one control group, and the
+ * allocator only hands a group the RMIDs that map onto it. The extra request
+ * PARTIDs don't make RMIDs independent of CLOSIDs, so
+ * CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID stays selected.
+ */
+static void resctrl_update_partid_translation(void)
+{
+	u32 num_partid = (u32)mpam_partid_max + 1;
+
+	resctrl_intpartid_mod = resctrl_num_closid;
+	resctrl_intpartid_per_closid = cdp_enabled ? 2 : 1;
+
+	if (!resctrl_using_extra_partids) {
+		resctrl_num_mon_groups = resctrl_num_closid;
+		resctrl_mon_group_mod = resctrl_num_closid;
+		return;
+	}
+
+	/*
+	 * A monitoring group is one request PARTID, or a (data, code) pair of
+	 * them with CDP. Leave room for every request PARTID of a group, and
+	 * wrap the group onto the control group that owns its internal PARTID.
+	 */
+	resctrl_num_mon_groups = num_partid / resctrl_intpartid_per_closid;
+	resctrl_mon_group_mod = resctrl_num_closid / resctrl_intpartid_per_closid;
+}
 
 /*
  * We use cacheinfo to discover the size of the caches and their id. cacheinfo
@@ -259,6 +308,14 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 
 	mpam_resctrl_set_num_rmid();
 
+	/*
+	 * CDP changes how a request PARTID maps onto a control group. Update
+	 * the setup-time arithmetic used by the task and monitor paths. The
+	 * RMID entries are re-decoded by setup_rmid_lru_list() after the
+	 * mount options are known, so they follow the same arithmetic.
+	 */
+	resctrl_update_partid_translation();
+
 	/* The mbw_max feature can't hide cdp as it's a per-partid maximum. */
 	if (cdp_enabled && !mpam_resctrl_controls[RDT_RESOURCE_MBA].cdp_enabled)
 		mpam_resctrl_controls[RDT_RESOURCE_MBA].resctrl_res.alloc_capable = false;
@@ -346,22 +403,16 @@ void resctrl_arch_rmid_idx_decode(u32 idx, u32 *closid, u32 *rmid)
 		if (closid) {
 			u32 grp = resctrl_rmid_to_partid(idx);
 
-			if (!cdp_enabled) {
-				*closid = mpam_partid_to_intpartid(grp);
-			} else if (grp < resctrl_num_mon_partid / 2) {
-				/*
-				 * The flat index is a monitoring group whose
-				 * request PARTIDs are 2*grp and 2*grp+1. Those
-				 * map onto the internal PARTID pair of control
-				 * group grp % (N/2). The upper half of the
-				 * flat index space has no such pair and must
-				 * never be allocated.
-				 */
-				*closid = grp % (resctrl_num_closid / 2);
-			} else {
-				/* Never matches a target CLOSID. */
+			/*
+			 * grp selects the monitoring group. Groups that would
+			 * need a request PARTID the hardware doesn't have are
+			 * not allocatable; decode them to a CLOSID that never
+			 * matches so the allocator can't hand them out.
+			 */
+			if (grp < resctrl_num_mon_groups)
+				*closid = grp % resctrl_mon_group_mod;
+			else
 				*closid = resctrl_num_closid - 1;
-			}
 		}
 		return;
 	}
@@ -449,17 +500,12 @@ void resctrl_arch_set_closid_rmid(struct task_struct *tsk, u32 closid, u32 rmid)
 static bool resctrl_partid_in_closid(u16 partid, u32 closid)
 {
 	/*
-	 * Translate the request PARTID to its internal PARTID first, then
-	 * halve it for CDP. Doing it the other way round wraps the upper
-	 * odd internal PARTIDs and maps them to the wrong control group.
+	 * A control group owns a set of request PARTIDs: those whose internal
+	 * PARTID is either half of the group's (data, code) pair. Reduce the
+	 * request PARTID to its control group using the same setup-time
+	 * arithmetic as the RMID decoding.
 	 */
-	if (resctrl_using_extra_partids)
-		partid = mpam_partid_to_intpartid(partid);
-
-	if (cdp_enabled)
-		partid >>= 1;
-
-	return partid == closid;
+	return (partid % resctrl_intpartid_mod) / resctrl_intpartid_per_closid == closid;
 }
 
 bool resctrl_arch_match_closid(struct task_struct *tsk, u32 closid)
@@ -2007,6 +2053,7 @@ static void mpam_resctrl_configure_partids(void)
 
 	/* Tell the driver how the request PARTIDs map onto control groups. */
 	mpam_partid_map_init(resctrl_num_mon_partid, resctrl_num_closid);
+	resctrl_update_partid_translation();
 
 	pr_debug("PARTIDs: monitor=%u closid=%u extra=%u\n",
 		 resctrl_num_mon_partid, resctrl_num_closid,
@@ -2073,6 +2120,7 @@ int mpam_resctrl_setup(void)
 		resctrl_using_extra_partids = false;
 		resctrl_num_mon_partid = resctrl_num_closid;
 		mpam_partid_map_init(resctrl_num_mon_partid, resctrl_num_closid);
+		resctrl_update_partid_translation();
 	}
 
 	cpus_read_unlock();
