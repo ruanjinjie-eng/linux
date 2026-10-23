@@ -62,6 +62,12 @@ static void *elf_kexec_load(struct kimage *image,
 	struct kexec_buf kbuf = {};
 	struct kexec_elf_info elf_info;
 	struct kexec_segment *kernel_segment;
+	struct kexec_load_params params = {
+		.initrd = initrd,
+		.initrd_len = initrd_len,
+		.cmdline = cmdline,
+		.cmdline_len = cmdline_len,
+	};
 
 	ret = kexec_build_elf_info(kernel, kernel_len, &ehdr, &elf_info);
 	if (ret < 0)
@@ -83,8 +89,9 @@ static void *elf_kexec_load(struct kimage *image,
 
 	/* Load additional data */
 	kernel_segment = &image->segment[kernel_segment_number];
-	ret = load_other_segments(image, kernel_segment->mem, kernel_segment->memsz,
-				  initrd, initrd_len, cmdline, cmdline_len);
+	params.kernel_load_addr = kernel_segment->mem;
+	params.kernel_size = kernel_segment->memsz;
+	ret = kexec_load_other_segments(image, &params, false);
 	if (ret < 0)
 		goto out;
 
