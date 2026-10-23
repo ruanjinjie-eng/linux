@@ -42,6 +42,12 @@ static void *image_load(struct kimage *image,
 	u64 flags;
 	bool be_image, be_kernel;
 	struct kexec_buf kbuf = {};
+	struct kexec_load_params params = {
+		.initrd = initrd,
+		.initrd_len = initrd_len,
+		.cmdline = cmdline,
+		.cmdline_len = cmdline_len,
+	};
 	int ret;
 
 	/* Check Image header */
@@ -83,8 +89,9 @@ static void *image_load(struct kimage *image,
 	pr_info("Loaded kernel at 0x%lx bufsz=0x%lx memsz=0x%lx\n",
 		kbuf.mem, kbuf.bufsz, kbuf.memsz);
 
-	ret = load_extra_segments(image, kbuf.mem, kbuf.memsz,
-				  initrd, initrd_len, cmdline, cmdline_len);
+	params.kernel_load_addr = kbuf.mem;
+	params.kernel_size = kbuf.memsz;
+	ret = kexec_load_other_segments(image, &params, true);
 
 out:
 	return ret ? ERR_PTR(ret) : NULL;
