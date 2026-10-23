@@ -62,6 +62,9 @@ static DEFINE_MUTEX(domain_list_lock);
  */
 static bool cdp_enabled;
 
+/* If resctrl is leveraging extra request PARTIDs for monitoring. */
+static bool resctrl_using_extra_partids;
+
 /*
  * We use cacheinfo to discover the size of the caches and their id. cacheinfo
  * populates this from a device_initcall(). mpam_resctrl_setup() must wait.
@@ -295,8 +298,22 @@ u32 resctrl_arch_system_num_rmid_idx(void)
 	return (mpam_pmg_max + 1) * (mpam_partid_max + 1);
 }
 
+/* The request PARTID and PMG a resctrl RMID maps onto. */
+static u16 resctrl_rmid_to_partid(u32 rmid)
+{
+	return rmid / (mpam_pmg_max + 1);
+}
+
+static u8 resctrl_rmid_to_pmg(u32 rmid)
+{
+	return rmid % (mpam_pmg_max + 1);
+}
+
 u32 resctrl_arch_rmid_idx_encode(u32 closid, u32 rmid)
 {
+	if (resctrl_using_extra_partids)
+		return rmid;
+
 	return closid * (mpam_pmg_max + 1) + rmid;
 }
 
@@ -308,8 +325,10 @@ bool resctrl_arch_rmid_idx_match(u32 closid, u32 rmid_closid)
 
 void resctrl_arch_rmid_idx_decode(u32 idx, u32 *closid, u32 *rmid)
 {
-	*closid = idx / (mpam_pmg_max + 1);
-	*rmid = idx % (mpam_pmg_max + 1);
+	if (closid)
+		*closid = idx / (mpam_pmg_max + 1);
+	if (rmid)
+		*rmid = idx % (mpam_pmg_max + 1);
 }
 
 void resctrl_arch_sched_in(struct task_struct *tsk)
@@ -323,21 +342,32 @@ static void resctrl_closid_rmid_to_partid_pmg(u32 closid, u32 rmid,
 					      u32 *partid_d, u32 *partid_i,
 					      u8 *pmg_d, u8 *pmg_i)
 {
-	WARN_ON_ONCE(closid > U16_MAX);
-	WARN_ON_ONCE(rmid > U8_MAX);
+	u16 partid = closid;
+	u8 pmg = rmid;
 
-	if (!cdp_enabled) {
-		*partid_d = *partid_i = closid;
-		*pmg_d = *pmg_i = rmid;
-	} else {
-		/*
-		 * When CDP is enabled, resctrl halves the closid range and we
-		 * use odd/even partid for one closid.
-		 */
-		*partid_d = resctrl_get_config_index(closid, CDP_DATA);
-		*partid_i = resctrl_get_config_index(closid, CDP_CODE);
-		*pmg_d = *pmg_i = rmid;
+	WARN_ON_ONCE(closid > U16_MAX);
+	WARN_ON_ONCE(!resctrl_using_extra_partids && rmid > U8_MAX);
+
+	/*
+	 * With the extra request PARTIDs the task's PARTID and PMG come from
+	 * the flat RMID, which is the monitoring group's index.
+	 */
+	if (resctrl_using_extra_partids) {
+		partid = resctrl_rmid_to_partid(rmid);
+		pmg = resctrl_rmid_to_pmg(rmid);
 	}
+
+	/*
+	 * When CDP is enabled, resctrl halves the closid range and we use
+	 * odd/even partid for one closid.
+	 */
+	if (!cdp_enabled) {
+		*partid_d = *partid_i = partid;
+	} else {
+		*partid_d = resctrl_get_config_index(partid, CDP_DATA);
+		*partid_i = resctrl_get_config_index(partid, CDP_CODE);
+	}
+	*pmg_d = *pmg_i = pmg;
 }
 
 void resctrl_arch_set_cpu_default_closid_rmid(int cpu, u32 closid, u32 rmid)
@@ -377,6 +407,14 @@ void resctrl_arch_set_closid_rmid(struct task_struct *tsk, u32 closid, u32 rmid)
 /* Does the request PARTID belong to this control group? */
 static bool resctrl_partid_in_closid(u16 partid, u32 closid)
 {
+	/*
+	 * Translate the request PARTID to its internal PARTID first, then
+	 * halve it for CDP. Doing it the other way round wraps the upper
+	 * odd internal PARTIDs and maps them to the wrong control group.
+	 */
+	if (resctrl_using_extra_partids)
+		partid = mpam_partid_to_intpartid(partid);
+
 	if (cdp_enabled)
 		partid >>= 1;
 
