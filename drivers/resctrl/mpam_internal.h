@@ -249,6 +249,13 @@ struct mpam_props {
 	u16			dspri_wd;
 	u16			num_csu_mon;
 	u16			num_mbwu_mon;
+	/*
+	 * The request PARTID comes from MPAM0_EL1; with narrowing, several
+	 * of them map onto one internal PARTID (intPARTID), which holds the
+	 * configuration. These names are only used by the narrowing code.
+	 */
+	u16			partid_max;
+	u16			intpartid_max;
 
 /*
  * Kunit tests use memset() to set up feature combinations that should be

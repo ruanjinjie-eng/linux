@@ -19,6 +19,14 @@ static void test__props_mismatch(struct kunit *test)
 	memset(&child, 0, sizeof(child));
 	KUNIT_EXPECT_EQ(test, memcmp(&parent, &child, sizeof(child)), 0);
 
+	/*
+	 * An aliasing merge starts from the first RIS' properties, so the
+	 * caller has to initialize the 0-based PARTID limits to the min()
+	 * identity. Zero is a valid limit and must not be treated as
+	 * "uninitialized".
+	 */
+	parent.partid_max = U16_MAX;
+	parent.intpartid_max = U16_MAX;
 	memset(&child, 0xff, sizeof(child));
 	__props_mismatch(&parent, &child, true);
 
