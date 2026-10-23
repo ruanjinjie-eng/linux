@@ -259,6 +259,21 @@ int kexec_kernel_verify_pe_sig(const char *kernel, unsigned long kernel_len);
 extern int kexec_add_buffer(struct kexec_buf *kbuf);
 int kexec_locate_mem_hole(struct kexec_buf *kbuf);
 
+struct kexec_load_params {
+	unsigned long kernel_load_addr;
+	unsigned long kernel_size;
+	char *initrd;
+	unsigned long initrd_len;
+	char *cmdline;
+	unsigned long cmdline_len;
+};
+
+int arch_kexec_setup_other_segments(struct kimage *image,
+				    struct kexec_load_params *params,
+				    unsigned long initrd_load_addr);
+int kexec_load_other_segments(struct kimage *image,
+			      struct kexec_load_params *params, bool top_down);
+
 #ifndef arch_kexec_locate_mem_hole
 /**
  * arch_kexec_locate_mem_hole - Find free memory to place the segments.

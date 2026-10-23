@@ -1295,3 +1295,93 @@ int kexec_purgatory_get_set_symbol(struct kimage *image, const char *name,
 	return 0;
 }
 #endif /* CONFIG_ARCH_SUPPORTS_KEXEC_PURGATORY */
+
+int __weak arch_kexec_setup_other_segments(struct kimage *image,
+					   struct kexec_load_params *params,
+					   unsigned long initrd_load_addr)
+{
+	return 0;
+}
+
+int kexec_load_other_segments(struct kimage *image,
+			      struct kexec_load_params *params, bool top_down)
+{
+	struct kexec_buf kbuf = {
+		.image = image,
+		/* Do not allocate anything below the kernel */
+		.buf_min = params->kernel_load_addr + params->kernel_size,
+		.buf_max = top_down ? PFN_PHYS(max_low_pfn) : ULONG_MAX,
+	};
+
+	unsigned long orig_segments = image->nr_segments;
+	unsigned long initrd_load_addr = 0;
+	int ret = 0;
+
+#ifdef CONFIG_CRASH_DUMP
+	if (image->type == KEXEC_TYPE_CRASH) {
+		ret = crash_prepare_headers(true, &kbuf.buffer, &kbuf.bufsz, NULL);
+		if (ret) {
+			pr_err("Preparing elf core header failed\n");
+			goto out_err;
+		}
+
+		if (unlikely(image->elf_headers))
+			vfree(image->elf_headers);
+
+		image->elf_headers = kbuf.buffer;
+		image->elf_headers_sz = kbuf.bufsz;
+
+		kbuf.mem = KEXEC_BUF_MEM_UNKNOWN;
+		kbuf.memsz = kbuf.bufsz;
+		kbuf.buf_align = SZ_64K; /* largest supported page size */
+		kbuf.top_down = true;
+
+		ret = kexec_add_buffer(&kbuf);
+		if (ret)
+			goto out_err;
+
+		image->elf_load_addr = kbuf.mem;
+
+		kexec_dprintk("Loaded elf core header at 0x%lx bufsz=0x%lx memsz=0x%lx\n",
+			      image->elf_load_addr, kbuf.bufsz, kbuf.memsz);
+	}
+#endif
+
+	if (params->initrd) {
+		kbuf.buffer = params->initrd;
+		kbuf.bufsz = params->initrd_len;
+		kbuf.mem = KEXEC_BUF_MEM_UNKNOWN;
+		kbuf.memsz = params->initrd_len;
+		kbuf.buf_align = 0;
+		/* within 1GB-aligned window of up to 32GB in size */
+		if (!top_down)
+			kbuf.buf_max = round_down(params->kernel_load_addr, SZ_1G) +
+					(unsigned long)SZ_1G * 32;
+		kbuf.top_down = top_down;
+
+		ret = kexec_add_buffer(&kbuf);
+		if (ret)
+			goto out_err;
+		initrd_load_addr = kbuf.mem;
+
+		kexec_dprintk("Loaded initrd at 0x%lx bufsz=0x%lx memsz=0x%lx\n",
+			      initrd_load_addr, kbuf.bufsz, kbuf.memsz);
+	}
+
+	ret = arch_kexec_setup_other_segments(image, params,
+					      initrd_load_addr);
+	if (ret)
+		goto out_err;
+
+	return 0;
+
+out_err:
+	while (image->nr_segments > orig_segments) {
+		kexec_free_segment_cma(image, image->nr_segments - 1);
+		image->nr_segments--;
+	}
+
+	kexec_free_elf_headers(image);
+
+	return ret;
+}
