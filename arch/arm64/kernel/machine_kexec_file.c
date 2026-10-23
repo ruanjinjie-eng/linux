@@ -63,91 +63,30 @@ int arch_crash_populate_cmem(struct crash_mem *cmem)
 }
 #endif
 
-/*
- * Tries to add the initrd and DTB to the image. If it is not possible to find
- * valid locations, this function will undo changes to the image and return non
- * zero.
- */
-int load_other_segments(struct kimage *image,
-			unsigned long kernel_load_addr,
-			unsigned long kernel_size,
-			char *initrd, unsigned long initrd_len,
-			char *cmdline)
+int arch_kexec_setup_other_segments(struct kimage *image,
+				    struct kexec_load_params *params,
+				    unsigned long initrd_load_addr)
 {
 	struct kexec_buf kbuf = {
 		.image = image,
-		/* not allocate anything below the kernel */
-		.buf_min = kernel_load_addr + kernel_size,
-		.buf_max = ULONG_MAX,
+		.buf_min = params->kernel_load_addr + params->kernel_size,
 	};
-	void *dtb = NULL;
-	unsigned long initrd_load_addr = 0, dtb_len,
-		      orig_segments = image->nr_segments;
-	int ret = 0;
+	unsigned long dtb_len;
+	void *dtb;
+	int ret;
 
-#ifdef CONFIG_CRASH_DUMP
-	/* load elf core header */
 	if (image->type == KEXEC_TYPE_CRASH) {
-		ret = crash_prepare_headers(true, &kbuf.buffer, &kbuf.bufsz, NULL);
-		if (ret) {
-			pr_err("Preparing elf core header failed\n");
-			goto out_err;
-		}
-
-		if (unlikely(image->elf_headers))
-			vfree(image->elf_headers);
-
-		image->elf_headers = kbuf.buffer;
-		image->elf_headers_sz = kbuf.bufsz;
-
-		kbuf.mem = KEXEC_BUF_MEM_UNKNOWN;
-		kbuf.memsz = kbuf.bufsz;
-		kbuf.buf_align = SZ_64K; /* largest supported page size */
-		kbuf.top_down = true;
-
-		ret = kexec_add_buffer(&kbuf);
-		if (ret)
-			goto out_err;
-
-		image->elf_load_addr = kbuf.mem;
-
-		kexec_dprintk("Loaded elf core header at 0x%lx bufsz=0x%lx memsz=0x%lx\n",
-			      image->elf_load_addr, kbuf.bufsz, kbuf.memsz);
-
 		ret = crash_load_dm_crypt_keys(image);
 		if (ret)
-			goto out_err;
-	}
-#endif
-
-	/* load initrd */
-	if (initrd) {
-		kbuf.buffer = initrd;
-		kbuf.bufsz = initrd_len;
-		kbuf.mem = KEXEC_BUF_MEM_UNKNOWN;
-		kbuf.memsz = initrd_len;
-		kbuf.buf_align = 0;
-		/* within 1GB-aligned window of up to 32GB in size */
-		kbuf.buf_max = round_down(kernel_load_addr, SZ_1G)
-						+ (unsigned long)SZ_1G * 32;
-		kbuf.top_down = false;
-
-		ret = kexec_add_buffer(&kbuf);
-		if (ret)
-			goto out_err;
-		initrd_load_addr = kbuf.mem;
-
-		kexec_dprintk("Loaded initrd at 0x%lx bufsz=0x%lx memsz=0x%lx\n",
-			      initrd_load_addr, kbuf.bufsz, kbuf.memsz);
+			return ret;
 	}
 
 	/* load dtb */
 	dtb = of_kexec_alloc_and_setup_fdt(image, initrd_load_addr,
-					   initrd_len, cmdline, 0);
+					   params->initrd_len, params->cmdline, 0);
 	if (!dtb) {
 		pr_err("Preparing for new dtb failed\n");
-		ret = -EINVAL;
-		goto out_err;
+		return -EINVAL;
 	}
 
 	/* trim it */
@@ -163,8 +102,10 @@ int load_other_segments(struct kimage *image,
 	kbuf.top_down = true;
 
 	ret = kexec_add_buffer(&kbuf);
-	if (ret)
-		goto out_err;
+	if (ret) {
+		kvfree(dtb);
+		return ret;
+	}
 	image->arch.dtb = dtb;
 	image->arch.dtb_mem = kbuf.mem;
 
@@ -172,12 +113,4 @@ int load_other_segments(struct kimage *image,
 		      kbuf.mem, kbuf.bufsz, kbuf.memsz);
 
 	return 0;
-
-out_err:
-	while (image->nr_segments > orig_segments) {
-		kexec_free_segment_cma(image, image->nr_segments - 1);
-		image->nr_segments--;
-	}
-	kvfree(dtb);
-	return ret;
 }
