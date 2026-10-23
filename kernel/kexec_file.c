@@ -100,6 +100,13 @@ int kexec_image_post_load_cleanup_default(struct kimage *image)
 	return image->fops->cleanup(image->image_loader_data);
 }
 
+static void kexec_free_elf_headers(struct kimage *image)
+{
+	vfree(image->elf_headers);
+	image->elf_headers = NULL;
+	image->elf_headers_sz = 0;
+}
+
 /*
  * Free up memory used by kernel, initrd, and command line. This is temporary
  * memory allocation which is not needed any more after these buffers have
@@ -117,6 +124,8 @@ void kimage_file_post_load_cleanup(struct kimage *image)
 
 	kfree(image->cmdline_buf);
 	image->cmdline_buf = NULL;
+
+	kexec_free_elf_headers(image);
 
 	vfree(pi->purgatory_buf);
 	pi->purgatory_buf = NULL;
