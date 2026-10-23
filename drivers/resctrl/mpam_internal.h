@@ -274,6 +274,35 @@ struct mpam_props {
 #define mpam_set_feature(_feat, x)	__set_bit(_feat, (x)->features)
 #define mpam_clear_feature(_feat, x)	__clear_bit(_feat, (x)->features)
 
+/*
+ * A non-aliasing control (e.g. a cache capacity) can't be presented by
+ * writing the same value to several PARTIDs: its value is additive, two 50%
+ * values add up to 100%. An aliasing control (e.g. a cache portion bitmap)
+ * shares the resource, so the same value written to each PARTID keeps its
+ * meaning.
+ *
+ * Priority is aliasing: MPAMCFG_PRI holds a priority value applied to the
+ * requests attributed to the selected PARTID (IHI 0099 9.6.15). Priority
+ * resolves conflicting requests but "does not directly affect the allocation
+ * of memory system resources" (5.2.10), so two request PARTIDs with the same
+ * priority are peers. Writing the same priority to every request PARTID of a
+ * control group doesn't make the group's requests any more important than
+ * one PARTID with that priority.
+ * Proportional stride is not: it divides bandwidth between the PARTIDs, so
+ * duplicating a stride changes each PARTID's share.
+ */
+static inline bool
+mpam_props_has_non_aliasing_controls(const struct mpam_props *props)
+{
+	return mpam_has_feature(mpam_feat_mbw_max, props) ||
+	       mpam_has_feature(mpam_feat_mbw_min, props) ||
+	       mpam_has_feature(mpam_feat_mbw_prop, props) ||
+	       mpam_has_feature(mpam_feat_cmax_cmax, props) ||
+	       mpam_has_feature(mpam_feat_cmax_cmin, props) ||
+	       mpam_has_feature(mpam_feat_cmax_cassoc, props) ||
+	       mpam_has_feature(mpam_feat_cmax_softlim, props);
+}
+
 /* Workaround bits for msc->quirks */
 enum mpam_device_quirks {
 	T241_SCRUB_SHADOW_REGS,
