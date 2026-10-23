@@ -229,6 +229,16 @@ enum mpam_device_features {
 	MPAM_FEATURE_LAST
 };
 
+/*
+ * Terminology
+ * -----------
+ * The MPAM architecture calls the PARTID in MPAM0_EL1/MPAM1_EL1 the request
+ * PARTID, and the PARTID that holds a control group's configuration the
+ * internal PARTID (intPARTID). Those names only have meaning when the
+ * optional PARTID-narrowing feature is present: without it every PARTID is
+ * both. They are therefore only used by the narrowing mapping; the rest of
+ * the driver uses PARTID, CLOSID and RMID.
+ */
 struct mpam_props {
 	DECLARE_BITMAP(features, MPAM_FEATURE_LAST);
 
@@ -241,6 +251,13 @@ struct mpam_props {
 	u16			dspri_wd;
 	u16			num_csu_mon;
 	u16			num_mbwu_mon;
+	/*
+	 * The request PARTID comes from MPAM0_EL1; with narrowing, several
+	 * of them map onto one internal PARTID (intPARTID), which holds the
+	 * configuration. These names are only used by the narrowing code.
+	 */
+	u16			partid_max;
+	u16			intpartid_max;
 
 /*
  * Kunit tests use memset() to set up feature combinations that should be
