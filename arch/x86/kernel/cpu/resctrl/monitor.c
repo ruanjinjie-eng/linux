@@ -202,7 +202,7 @@ void resctrl_arch_reset_rmid_all(struct rdt_resource *r, struct rdt_l3_mon_domai
 	int idx;
 
 	for_each_mbm_event_id(eventid) {
-		if (!resctrl_is_mon_event_enabled(eventid))
+		if (!resctrl_is_mon_event_enabled(r, eventid))
 			continue;
 		idx = MBM_STATE_IDX(eventid);
 		memset(hw_dom->arch_mbm_states[idx], 0,
@@ -561,7 +561,7 @@ void resctrl_arch_config_cntr(struct rdt_resource *r, struct rdt_l3_mon_domain *
 	abmc_cfg.split.cntr_id = cntr_id;
 	abmc_cfg.split.bw_src = rmid;
 	if (assign)
-		abmc_cfg.split.bw_type = resctrl_get_mon_evt_cfg(evtid);
+		abmc_cfg.split.bw_type = resctrl_get_mon_evt_cfg(r, evtid);
 
 	smp_call_function_any(&d->hdr.cpu_mask, resctrl_abmc_config_one_amd, &abmc_cfg, 1);
 

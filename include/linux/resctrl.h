@@ -419,10 +419,12 @@ u32 resctrl_arch_get_num_closid(struct rdt_resource *r);
 u32 resctrl_arch_system_num_rmid_idx(void);
 int resctrl_arch_update_domains(struct rdt_resource *r, u32 closid);
 
-bool resctrl_enable_mon_event(enum resctrl_event_id eventid, bool any_cpu,
+bool resctrl_enable_mon_event(struct rdt_resource *r,
+			      enum resctrl_event_id eventid, bool any_cpu,
 			      unsigned int binary_bits, void *arch_priv);
 
-bool resctrl_is_mon_event_enabled(enum resctrl_event_id eventid);
+bool resctrl_is_mon_event_enabled(struct rdt_resource *r,
+				  enum resctrl_event_id eventid);
 
 bool resctrl_arch_is_evt_configurable(enum resctrl_event_id evt);
 
@@ -432,7 +434,8 @@ static inline bool resctrl_is_mbm_event(enum resctrl_event_id eventid)
 		eventid <= QOS_MBM_LOCAL_EVENT_ID);
 }
 
-u32 resctrl_get_mon_evt_cfg(enum resctrl_event_id eventid);
+u32 resctrl_get_mon_evt_cfg(struct rdt_resource *r,
+			    enum resctrl_event_id eventid);
 
 /* Iterate over all memory bandwidth events */
 #define for_each_mbm_event_id(eventid)				\

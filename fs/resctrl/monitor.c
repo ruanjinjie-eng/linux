@@ -345,7 +345,7 @@ void free_rmid(u32 closid, u32 rmid)
 
 	entry = __rmid_entry(idx);
 
-	if (resctrl_is_mon_event_enabled(QOS_OCCUP_EVENT_ID))
+	if (resctrl_is_mon_event_enabled_any(QOS_OCCUP_EVENT_ID))
 		add_rmid_to_limbo(entry);
 	else
 		list_add_tail(&entry->list, &rmid_free_lru);
@@ -797,15 +797,16 @@ static void mbm_update_one_event(struct rdt_resource *r, struct rdt_l3_mon_domai
 static void mbm_update(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 		       struct rdtgroup *rdtgrp)
 {
+	enum resctrl_event_id evtid;
+
 	/*
 	 * This is protected from concurrent reads from user as both
 	 * the user and overflow handler hold the global mutex.
 	 */
-	if (resctrl_is_mon_event_enabled(QOS_MBM_TOTAL_EVENT_ID))
-		mbm_update_one_event(r, d, rdtgrp, QOS_MBM_TOTAL_EVENT_ID);
-
-	if (resctrl_is_mon_event_enabled(QOS_MBM_LOCAL_EVENT_ID))
-		mbm_update_one_event(r, d, rdtgrp, QOS_MBM_LOCAL_EVENT_ID);
+	for_each_mbm_event_id(evtid) {
+		if (resctrl_is_mon_event_enabled(r, evtid))
+			mbm_update_one_event(r, d, rdtgrp, evtid);
+	}
 }
 
 /*
@@ -1045,36 +1046,55 @@ struct mon_evt mon_event_all[QOS_NUM_EVENTS] = {
 	MON_EVENT(PMT_EVENT_PCNT,			"pcnt",			RDT_RESOURCE_PERF_PKG,	false),
 };
 
-bool resctrl_enable_mon_event(enum resctrl_event_id eventid, bool any_cpu,
+bool resctrl_enable_mon_event(struct rdt_resource *r,
+			      enum resctrl_event_id eventid, bool any_cpu,
 			      unsigned int binary_bits, void *arch_priv)
 {
+	struct mon_evt *mevt;
+
 	if (WARN_ON_ONCE(eventid < QOS_FIRST_EVENT || eventid >= QOS_NUM_EVENTS ||
 			 binary_bits > MAX_BINARY_BITS))
 		return false;
-	if (mon_event_all[eventid].enabled) {
-		pr_warn("Duplicate enable for event %d\n", eventid);
+
+	mevt = &mon_event_all[eventid];
+	if (mevt->enabled) {
+		pr_warn("Duplicate enable for event %d on resource %d\n",
+			eventid, r->rid);
 		return false;
 	}
-	if (binary_bits && !mon_event_all[eventid].is_floating_point) {
+	if (binary_bits && !mevt->is_floating_point) {
 		pr_warn("Event %d may not be floating point\n", eventid);
 		return false;
 	}
 
-	mon_event_all[eventid].any_cpu = any_cpu;
-	mon_event_all[eventid].binary_bits = binary_bits;
-	mon_event_all[eventid].arch_priv = arch_priv;
-	mon_event_all[eventid].enabled = true;
+	mevt->any_cpu = any_cpu;
+	mevt->binary_bits = binary_bits;
+	mevt->arch_priv = arch_priv;
+	mevt->enabled = true;
 
 	return true;
 }
 
-bool resctrl_is_mon_event_enabled(enum resctrl_event_id eventid)
+bool resctrl_is_mon_event_enabled(struct rdt_resource *r,
+				  enum resctrl_event_id eventid)
 {
 	return eventid >= QOS_FIRST_EVENT && eventid < QOS_NUM_EVENTS &&
 	       mon_event_all[eventid].enabled;
 }
 
-u32 resctrl_get_mon_evt_cfg(enum resctrl_event_id evtid)
+bool resctrl_is_mon_event_enabled_any(enum resctrl_event_id eventid)
+{
+	struct rdt_resource *r;
+
+	for_each_mon_capable_rdt_resource(r) {
+		if (resctrl_is_mon_event_enabled(r, eventid))
+			return true;
+	}
+
+	return false;
+}
+
+u32 resctrl_get_mon_evt_cfg(struct rdt_resource *r, enum resctrl_event_id evtid)
 {
 	return mon_event_all[evtid].evt_cfg;
 }
@@ -1210,7 +1230,7 @@ static void resctrl_reset_rmid_all(struct rdt_resource *r, struct rdt_l3_mon_dom
 	int idx;
 
 	for_each_mbm_event_id(evt) {
-		if (!resctrl_is_mon_event_enabled(evt))
+		if (!resctrl_is_mon_event_enabled(r, evt))
 			continue;
 		idx = MBM_STATE_IDX(evt);
 		memset(d->mbm_states[idx], 0, sizeof(*d->mbm_states[0]) * idx_limit);
@@ -1319,11 +1339,11 @@ void rdtgroup_assign_cntrs(struct rdtgroup *rdtgrp)
 	    !r->mon.mbm_assign_on_mkdir)
 		return;
 
-	if (resctrl_is_mon_event_enabled(QOS_MBM_TOTAL_EVENT_ID))
+	if (resctrl_is_mon_event_enabled(r, QOS_MBM_TOTAL_EVENT_ID))
 		rdtgroup_assign_cntr_event(NULL, rdtgrp,
 					   &mon_event_all[QOS_MBM_TOTAL_EVENT_ID]);
 
-	if (resctrl_is_mon_event_enabled(QOS_MBM_LOCAL_EVENT_ID))
+	if (resctrl_is_mon_event_enabled(r, QOS_MBM_LOCAL_EVENT_ID))
 		rdtgroup_assign_cntr_event(NULL, rdtgrp,
 					   &mon_event_all[QOS_MBM_LOCAL_EVENT_ID]);
 }
@@ -1377,11 +1397,11 @@ void rdtgroup_unassign_cntrs(struct rdtgroup *rdtgrp)
 	if (!r->mon_capable || !resctrl_arch_mbm_cntr_assign_enabled(r))
 		return;
 
-	if (resctrl_is_mon_event_enabled(QOS_MBM_TOTAL_EVENT_ID))
+	if (resctrl_is_mon_event_enabled(r, QOS_MBM_TOTAL_EVENT_ID))
 		rdtgroup_unassign_cntr_event(NULL, rdtgrp,
 					     &mon_event_all[QOS_MBM_TOTAL_EVENT_ID]);
 
-	if (resctrl_is_mon_event_enabled(QOS_MBM_LOCAL_EVENT_ID))
+	if (resctrl_is_mon_event_enabled(r, QOS_MBM_LOCAL_EVENT_ID))
 		rdtgroup_unassign_cntr_event(NULL, rdtgrp,
 					     &mon_event_all[QOS_MBM_LOCAL_EVENT_ID]);
 }
@@ -1594,9 +1614,9 @@ ssize_t resctrl_mbm_assign_mode_write(struct kernfs_open_file *of, char *buf,
 		 * Initialize the default memory transaction values for
 		 * total and local events.
 		 */
-		if (resctrl_is_mon_event_enabled(QOS_MBM_TOTAL_EVENT_ID))
+		if (resctrl_is_mon_event_enabled(r, QOS_MBM_TOTAL_EVENT_ID))
 			mon_event_all[QOS_MBM_TOTAL_EVENT_ID].evt_cfg = r->mon.mbm_cfg_mask;
-		if (resctrl_is_mon_event_enabled(QOS_MBM_LOCAL_EVENT_ID))
+		if (resctrl_is_mon_event_enabled(r, QOS_MBM_LOCAL_EVENT_ID))
 			mon_event_all[QOS_MBM_LOCAL_EVENT_ID].evt_cfg = r->mon.mbm_cfg_mask &
 									   (READS_TO_LOCAL_MEM |
 									    READS_TO_LOCAL_S_MEM |
@@ -1947,15 +1967,15 @@ int resctrl_l3_mon_resource_init(void)
 					 RFTYPE_MON_INFO | RFTYPE_RES_CACHE);
 	}
 
-	if (resctrl_is_mon_event_enabled(QOS_MBM_LOCAL_EVENT_ID))
+	if (resctrl_is_mon_event_enabled(r, QOS_MBM_LOCAL_EVENT_ID))
 		mba_mbps_default_event = QOS_MBM_LOCAL_EVENT_ID;
-	else if (resctrl_is_mon_event_enabled(QOS_MBM_TOTAL_EVENT_ID))
+	else if (resctrl_is_mon_event_enabled(r, QOS_MBM_TOTAL_EVENT_ID))
 		mba_mbps_default_event = QOS_MBM_TOTAL_EVENT_ID;
 
 	if (r->mon.mbm_cntr_assignable) {
-		if (resctrl_is_mon_event_enabled(QOS_MBM_TOTAL_EVENT_ID))
+		if (resctrl_is_mon_event_enabled(r, QOS_MBM_TOTAL_EVENT_ID))
 			mon_event_all[QOS_MBM_TOTAL_EVENT_ID].evt_cfg = r->mon.mbm_cfg_mask;
-		if (resctrl_is_mon_event_enabled(QOS_MBM_LOCAL_EVENT_ID))
+		if (resctrl_is_mon_event_enabled(r, QOS_MBM_LOCAL_EVENT_ID))
 			mon_event_all[QOS_MBM_LOCAL_EVENT_ID].evt_cfg = r->mon.mbm_cfg_mask &
 									   (READS_TO_LOCAL_MEM |
 									    READS_TO_LOCAL_S_MEM |

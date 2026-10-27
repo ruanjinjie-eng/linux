@@ -85,6 +85,8 @@ struct mon_evt {
 
 extern struct mon_evt mon_event_all[QOS_NUM_EVENTS];
 
+bool resctrl_is_mon_event_enabled_any(enum resctrl_event_id eventid);
+
 #define for_each_mon_event(mevt) for (mevt = &mon_event_all[QOS_FIRST_EVENT];	\
 				      mevt < &mon_event_all[QOS_NUM_EVENTS]; mevt++)
 
