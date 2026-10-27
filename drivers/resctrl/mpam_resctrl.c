@@ -1123,9 +1123,10 @@ static void mpam_resctrl_pick_counters(void)
 	guard(srcu)(&mpam_srcu);
 	list_for_each_entry_srcu(class, &mpam_classes, classes_list,
 				 srcu_read_lock_held(&mpam_srcu)) {
-		/* The name of the resource is L3... */
-		if (class->type == MPAM_CLASS_CACHE && class->level != 3) {
-			pr_debug("class %u is a cache but not the L3", class->level);
+		if (class->type == MPAM_CLASS_CACHE && class->level != 2 &&
+		    class->level != 3) {
+			pr_debug("class %u is a cache but not L2 or L3",
+				 class->level);
 			continue;
 		}
 
@@ -1145,16 +1146,24 @@ static void mpam_resctrl_pick_counters(void)
 				if (update_rmid_limits(class))
 					break;
 
-				counter_update_class(RDT_RESOURCE_L3, QOS_OCCUP_EVENT_ID, class);
+				counter_update_class(class->level == 2 ?
+						     RDT_RESOURCE_L2 :
+						     RDT_RESOURCE_L3,
+						     QOS_OCCUP_EVENT_ID, class);
 				break;
 			default:
 				break;
 			}
 		}
 
+		/*
+		 * Check the traffic first: an L2 class can have usable MBWU
+		 * but can never match the L3 traffic, and topology_matches_l3()
+		 * warns if a cache has no online CPU.
+		 */
 		if (class_has_usable_mbwu(class) &&
-		    topology_matches_l3(class) &&
-		    traffic_matches_l3(class)) {
+		    traffic_matches_l3(class) &&
+		    topology_matches_l3(class)) {
 			pr_debug("class %u has usable MBWU, and matches L3 topology and traffic\n",
 				 class->level);
 
@@ -1168,6 +1177,14 @@ static void mpam_resctrl_pick_counters(void)
 			 * mbm_total.
 			 */
 			counter_update_class(RDT_RESOURCE_L3, QOS_MBM_TOTAL_EVENT_ID, class);
+		}
+
+		if (class->type == MPAM_CLASS_CACHE && class->level == 2 &&
+		    class_has_usable_mbwu(class)) {
+			pr_debug("class %u has usable MBWU for the L2 resource\n",
+				 class->level);
+			counter_update_class(RDT_RESOURCE_L2,
+					     QOS_MBM_TOTAL_EVENT_ID, class);
 		}
 	}
 }
