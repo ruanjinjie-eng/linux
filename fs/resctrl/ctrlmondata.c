@@ -484,13 +484,13 @@ ssize_t rdtgroup_mba_mbps_event_write(struct kernfs_open_file *of,
 	buf[nbytes - 1] = '\0';
 
 	if (!strcmp(buf, "mbm_local_bytes")) {
-		if (resctrl_is_mon_event_enabled(QOS_L3_MBM_LOCAL_EVENT_ID))
-			rdtgrp->mba_mbps_event = QOS_L3_MBM_LOCAL_EVENT_ID;
+		if (resctrl_is_mon_event_enabled(QOS_MBM_LOCAL_EVENT_ID))
+			rdtgrp->mba_mbps_event = QOS_MBM_LOCAL_EVENT_ID;
 		else
 			ret = -EINVAL;
 	} else if (!strcmp(buf, "mbm_total_bytes")) {
-		if (resctrl_is_mon_event_enabled(QOS_L3_MBM_TOTAL_EVENT_ID))
-			rdtgrp->mba_mbps_event = QOS_L3_MBM_TOTAL_EVENT_ID;
+		if (resctrl_is_mon_event_enabled(QOS_MBM_TOTAL_EVENT_ID))
+			rdtgrp->mba_mbps_event = QOS_MBM_TOTAL_EVENT_ID;
 		else
 			ret = -EINVAL;
 	} else {
@@ -516,10 +516,10 @@ int rdtgroup_mba_mbps_event_show(struct kernfs_open_file *of,
 
 	if (rdtgrp) {
 		switch (rdtgrp->mba_mbps_event) {
-		case QOS_L3_MBM_LOCAL_EVENT_ID:
+		case QOS_MBM_LOCAL_EVENT_ID:
 			seq_puts(s, "mbm_local_bytes\n");
 			break;
-		case QOS_L3_MBM_TOTAL_EVENT_ID:
+		case QOS_MBM_TOTAL_EVENT_ID:
 			seq_puts(s, "mbm_total_bytes\n");
 			break;
 		default:
