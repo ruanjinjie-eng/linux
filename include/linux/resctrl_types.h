@@ -43,12 +43,13 @@ enum resctrl_event_id {
 	QOS_FIRST_EVENT			= 0x01,
 
 	/*
-	 * These values match those used to program IA32_QM_EVTSEL before
-	 * reading IA32_QM_CTR on RDT systems.
+	 * Monitor event types. The resource an event belongs to is tracked
+	 * separately. These values match those used to program IA32_QM_EVTSEL
+	 * before reading IA32_QM_CTR on RDT systems.
 	 */
-	QOS_L3_OCCUP_EVENT_ID		= 0x01,
-	QOS_L3_MBM_TOTAL_EVENT_ID	= 0x02,
-	QOS_L3_MBM_LOCAL_EVENT_ID	= 0x03,
+	QOS_OCCUP_EVENT_ID		= 0x01,
+	QOS_MBM_TOTAL_EVENT_ID		= 0x02,
+	QOS_MBM_LOCAL_EVENT_ID		= 0x03,
 
 	/* Intel Telemetry Events */
 	PMT_EVENT_ENERGY,
@@ -67,7 +68,13 @@ enum resctrl_event_id {
 	QOS_NUM_EVENTS,
 };
 
-#define QOS_NUM_L3_MBM_EVENTS	(QOS_L3_MBM_LOCAL_EVENT_ID - QOS_L3_MBM_TOTAL_EVENT_ID + 1)
-#define MBM_STATE_IDX(evt)	((evt) - QOS_L3_MBM_TOTAL_EVENT_ID)
+#define QOS_NUM_MBM_EVENTS	(QOS_MBM_LOCAL_EVENT_ID - QOS_MBM_TOTAL_EVENT_ID + 1)
+#define MBM_STATE_IDX(evt)	((evt) - QOS_MBM_TOTAL_EVENT_ID)
+
+/* Old names, kept until every architecture has been converted. */
+#define QOS_L3_OCCUP_EVENT_ID		QOS_OCCUP_EVENT_ID
+#define QOS_L3_MBM_TOTAL_EVENT_ID	QOS_MBM_TOTAL_EVENT_ID
+#define QOS_L3_MBM_LOCAL_EVENT_ID	QOS_MBM_LOCAL_EVENT_ID
+#define QOS_NUM_L3_MBM_EVENTS		QOS_NUM_MBM_EVENTS
 
 #endif /* __LINUX_RESCTRL_TYPES_H */
