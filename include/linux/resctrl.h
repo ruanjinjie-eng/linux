@@ -198,7 +198,7 @@ struct rdt_l3_mon_domain {
 	struct rdt_domain_hdr		hdr;
 	unsigned int			ci_id;
 	unsigned long			*rmid_busy_llc;
-	struct mbm_state		*mbm_states[QOS_NUM_L3_MBM_EVENTS];
+	struct mbm_state		*mbm_states[QOS_NUM_MBM_EVENTS];
 	struct delayed_work		mbm_over;
 	struct delayed_work		cqm_limbo;
 	int				mbm_work_cpu;
@@ -428,20 +428,20 @@ bool resctrl_arch_is_evt_configurable(enum resctrl_event_id evt);
 
 static inline bool resctrl_is_mbm_event(enum resctrl_event_id eventid)
 {
-	return (eventid >= QOS_L3_MBM_TOTAL_EVENT_ID &&
-		eventid <= QOS_L3_MBM_LOCAL_EVENT_ID);
+	return (eventid >= QOS_MBM_TOTAL_EVENT_ID &&
+		eventid <= QOS_MBM_LOCAL_EVENT_ID);
 }
 
 u32 resctrl_get_mon_evt_cfg(enum resctrl_event_id eventid);
 
 /* Iterate over all memory bandwidth events */
 #define for_each_mbm_event_id(eventid)				\
-	for (eventid = QOS_L3_MBM_TOTAL_EVENT_ID;		\
-	     eventid <= QOS_L3_MBM_LOCAL_EVENT_ID; eventid++)
+	for (eventid = QOS_MBM_TOTAL_EVENT_ID;		\
+	     eventid <= QOS_MBM_LOCAL_EVENT_ID; eventid++)
 
 /* Iterate over memory bandwidth arrays in domain structures */
 #define for_each_mbm_idx(idx)					\
-	for (idx = 0; idx < QOS_NUM_L3_MBM_EVENTS; idx++)
+	for (idx = 0; idx < QOS_NUM_MBM_EVENTS; idx++)
 
 /**
  * resctrl_arch_mon_event_config_write() - Write the config for an event.
@@ -650,8 +650,8 @@ void resctrl_arch_reset_all_ctrls(struct rdt_resource *r);
  *				and event details.
  * @r:			Resource structure.
  * @d:			The domain in which counter with ID @cntr_id should be configured.
- * @evtid:		Monitoring event type (e.g., QOS_L3_MBM_TOTAL_EVENT_ID
- *			or QOS_L3_MBM_LOCAL_EVENT_ID).
+ * @evtid:		Monitoring event type (e.g., QOS_MBM_TOTAL_EVENT_ID
+ *			or QOS_MBM_LOCAL_EVENT_ID).
  * @rmid:		RMID.
  * @closid:		CLOSID.
  * @cntr_id:		Counter ID to configure.
