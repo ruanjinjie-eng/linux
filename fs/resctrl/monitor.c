@@ -1395,19 +1395,20 @@ static int rdtgroup_assign_cntr_event(struct rdt_l3_mon_domain *d, struct rdtgro
  */
 void rdtgroup_assign_cntrs(struct rdtgroup *rdtgrp)
 {
-	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+	struct mon_evt *mevt;
+	struct rdt_resource *r;
 
-	if (!r->mon_capable || !resctrl_arch_mbm_cntr_assign_enabled(r) ||
-	    !r->mon.mbm_assign_on_mkdir)
-		return;
+	for_each_mon_capable_rdt_resource(r) {
+		if (!resctrl_arch_mbm_cntr_assign_enabled(r) ||
+		    !r->mon.mbm_assign_on_mkdir)
+			continue;
 
-	if (resctrl_is_mon_event_enabled(r, QOS_MBM_TOTAL_EVENT_ID))
-		rdtgroup_assign_cntr_event(NULL, rdtgrp,
-					   resctrl_mon_evt(r, QOS_MBM_TOTAL_EVENT_ID));
-
-	if (resctrl_is_mon_event_enabled(r, QOS_MBM_LOCAL_EVENT_ID))
-		rdtgroup_assign_cntr_event(NULL, rdtgrp,
-					   resctrl_mon_evt(r, QOS_MBM_LOCAL_EVENT_ID));
+		for_each_mon_event(r, mevt) {
+			if (!mevt->enabled || !resctrl_is_mbm_event(mevt->evtid))
+				continue;
+			rdtgroup_assign_cntr_event(NULL, rdtgrp, mevt);
+		}
+	}
 }
 
 /**
@@ -1508,18 +1509,19 @@ static void rdtgroup_unassign_cntr_event(struct rdt_l3_mon_domain *d, struct rdt
  */
 void rdtgroup_unassign_cntrs(struct rdtgroup *rdtgrp)
 {
-	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+	struct mon_evt *mevt;
+	struct rdt_resource *r;
 
-	if (!r->mon_capable || !resctrl_arch_mbm_cntr_assign_enabled(r))
-		return;
+	for_each_mon_capable_rdt_resource(r) {
+		if (!resctrl_arch_mbm_cntr_assign_enabled(r))
+			continue;
 
-	if (resctrl_is_mon_event_enabled(r, QOS_MBM_TOTAL_EVENT_ID))
-		rdtgroup_unassign_cntr_event(NULL, rdtgrp,
-					     resctrl_mon_evt(r, QOS_MBM_TOTAL_EVENT_ID));
-
-	if (resctrl_is_mon_event_enabled(r, QOS_MBM_LOCAL_EVENT_ID))
-		rdtgroup_unassign_cntr_event(NULL, rdtgrp,
-					     resctrl_mon_evt(r, QOS_MBM_LOCAL_EVENT_ID));
+		for_each_mon_event(r, mevt) {
+			if (!mevt->enabled || !resctrl_is_mbm_event(mevt->evtid))
+				continue;
+			rdtgroup_unassign_cntr_event(NULL, rdtgrp, mevt);
+		}
+	}
 }
 
 static int resctrl_parse_mem_transactions(char *tok, u32 *val)
@@ -2047,7 +2049,7 @@ static void closid_num_dirty_rmid_free(void)
 }
 
 /**
- * resctrl_l3_mon_resource_init() - Initialise global monitoring structures.
+ * resctrl_mon_resource_init() - Initialise global monitoring structures.
  *
  * Allocate and initialise global monitor resources that do not belong to a
  * specific domain. i.e. the closid_num_dirty_rmid[] used to find the CLOSID
@@ -2057,37 +2059,49 @@ static void closid_num_dirty_rmid_free(void)
  * Resctrl's cpuhp callbacks may be called before this point to bring a domain
  * online.
  *
+ * The L3 events remain the backing for the MBA software controller and for the
+ * event configuration files, which are named after the L3 events.
+ *
  * Return: 0 for success, or -ENOMEM.
  */
-int resctrl_l3_mon_resource_init(void)
+int resctrl_mon_resource_init(void)
 {
-	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+	struct rdt_resource *l3 = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+	bool assignable = false, configurable = false;
+	struct rdt_resource *r;
 	int ret;
 
-	if (!r->mon_capable)
+	if (!resctrl_arch_mon_capable())
 		return 0;
 
-	ret = closid_num_dirty_rmid_alloc(r);
+	ret = closid_num_dirty_rmid_alloc(l3);
 	if (ret)
 		return ret;
 
+	/*
+	 * BMEC is L3 only: resctrl_arch_is_evt_configurable() has no resource
+	 * argument. The L2 events are not configurable.
+	 */
 	if (resctrl_arch_is_evt_configurable(QOS_MBM_TOTAL_EVENT_ID)) {
-		resctrl_mon_evt(r, QOS_MBM_TOTAL_EVENT_ID)->configurable = true;
+		resctrl_mon_evt(l3, QOS_MBM_TOTAL_EVENT_ID)->configurable = true;
 		resctrl_file_fflags_init("mbm_total_bytes_config",
 					 RFTYPE_MON_INFO | RFTYPE_RES_CACHE);
 	}
 	if (resctrl_arch_is_evt_configurable(QOS_MBM_LOCAL_EVENT_ID)) {
-		resctrl_mon_evt(r, QOS_MBM_LOCAL_EVENT_ID)->configurable = true;
+		resctrl_mon_evt(l3, QOS_MBM_LOCAL_EVENT_ID)->configurable = true;
 		resctrl_file_fflags_init("mbm_local_bytes_config",
 					 RFTYPE_MON_INFO | RFTYPE_RES_CACHE);
 	}
 
-	if (resctrl_is_mon_event_enabled(r, QOS_MBM_LOCAL_EVENT_ID))
+	if (resctrl_is_mon_event_enabled(l3, QOS_MBM_LOCAL_EVENT_ID))
 		mba_mbps_default_event = QOS_MBM_LOCAL_EVENT_ID;
-	else if (resctrl_is_mon_event_enabled(r, QOS_MBM_TOTAL_EVENT_ID))
+	else if (resctrl_is_mon_event_enabled(l3, QOS_MBM_TOTAL_EVENT_ID))
 		mba_mbps_default_event = QOS_MBM_TOTAL_EVENT_ID;
 
-	if (r->mon.mbm_cntr_assignable) {
+	for_each_mon_capable_rdt_resource(r) {
+		if (!r->mon.mbm_cntr_assignable)
+			continue;
+
 		if (resctrl_is_mon_event_enabled(r, QOS_MBM_TOTAL_EVENT_ID))
 			resctrl_mon_evt(r, QOS_MBM_TOTAL_EVENT_ID)->evt_cfg = r->mon.mbm_cfg_mask;
 		if (resctrl_is_mon_event_enabled(r, QOS_MBM_LOCAL_EVENT_ID))
@@ -2096,26 +2110,32 @@ int resctrl_l3_mon_resource_init(void)
 									    READS_TO_LOCAL_S_MEM |
 									    NON_TEMP_WRITE_TO_LOCAL_MEM);
 		r->mon.mbm_assign_on_mkdir = true;
+		assignable = true;
+		configurable |= r->mon.mbm_cntr_configurable;
+	}
+
+	if (assignable) {
 		resctrl_file_fflags_init("num_mbm_cntrs",
 					 RFTYPE_MON_INFO | RFTYPE_RES_CACHE);
 		resctrl_file_fflags_init("available_mbm_cntrs",
 					 RFTYPE_MON_INFO | RFTYPE_RES_CACHE);
 		resctrl_file_fflags_init("event_filter", RFTYPE_ASSIGN_CONFIG);
-		if (r->mon.mbm_cntr_configurable)
+		if (configurable)
 			resctrl_file_mode_init("event_filter", 0644);
 		resctrl_file_fflags_init("mbm_assign_on_mkdir", RFTYPE_MON_INFO |
 					 RFTYPE_RES_CACHE);
-		resctrl_file_fflags_init("mbm_L3_assignments", RFTYPE_MON_BASE);
 	}
+
+	/* The counter assignment interface is named after the L3 events. */
+	if (l3->mon.mbm_cntr_assignable)
+		resctrl_file_fflags_init("mbm_L3_assignments", RFTYPE_MON_BASE);
 
 	return 0;
 }
 
-void resctrl_l3_mon_resource_exit(void)
+void resctrl_mon_resource_exit(void)
 {
-	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
-
-	if (!r->mon_capable)
+	if (!resctrl_arch_mon_capable())
 		return;
 
 	closid_num_dirty_rmid_free();
