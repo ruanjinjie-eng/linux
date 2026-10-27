@@ -122,10 +122,10 @@ void rdt_staged_configs_clear(void)
 	}
 }
 
-static bool resctrl_is_mbm_enabled(void)
+static bool resctrl_is_mbm_enabled(struct rdt_resource *r)
 {
-	return (resctrl_is_mon_event_enabled(QOS_MBM_TOTAL_EVENT_ID) ||
-		resctrl_is_mon_event_enabled(QOS_MBM_LOCAL_EVENT_ID));
+	return (resctrl_is_mon_event_enabled(r, QOS_MBM_TOTAL_EVENT_ID) ||
+		resctrl_is_mon_event_enabled(r, QOS_MBM_LOCAL_EVENT_ID));
 }
 
 /*
@@ -191,7 +191,7 @@ static int closid_alloc(void)
 	lockdep_assert_held(&rdtgroup_mutex);
 
 	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID) &&
-	    resctrl_is_mon_event_enabled(QOS_OCCUP_EVENT_ID)) {
+	    resctrl_is_mon_event_enabled_any(QOS_OCCUP_EVENT_ID)) {
 		cleanest_closid = resctrl_find_cleanest_closid();
 		if (cleanest_closid < 0)
 			return cleanest_closid;
@@ -2620,7 +2620,7 @@ static bool supports_mba_mbps(void)
 	struct rdt_resource *rmbm = resctrl_arch_get_resource(RDT_RESOURCE_L3);
 	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_MBA);
 
-	return (resctrl_is_mbm_enabled() &&
+	return (resctrl_is_mbm_enabled(rmbm) &&
 		r->alloc_capable && is_mba_linear() &&
 		r->ctrl_scope == rmbm->mon_scope &&
 		!rmbm->mon.mbm_cntr_assignable);
@@ -3254,8 +3254,8 @@ static int rdt_get_tree(struct fs_context *fc)
 	if (resctrl_arch_alloc_capable() || resctrl_arch_mon_capable())
 		resctrl_mounted = true;
 
-	if (resctrl_is_mbm_enabled()) {
-		r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+	r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+	if (resctrl_is_mbm_enabled(r)) {
 		list_for_each_entry_rcu(dom, &r->mon_domains, hdr.list, lockdep_is_cpus_held())
 			mbm_setup_overflow_handler(dom, MBM_OVERFLOW_INTERVAL,
 						   RESCTRL_PICK_ANY_CPU);
@@ -4559,9 +4559,9 @@ void resctrl_offline_mon_domain(struct rdt_resource *r, struct rdt_domain_hdr *h
 	if (r->rid == RDT_RESOURCE_L3 &&
 	    domain_header_is_valid(hdr, RESCTRL_MON_DOMAIN, RDT_RESOURCE_L3)) {
 		d = container_of(hdr, struct rdt_l3_mon_domain, hdr);
-		if (resctrl_is_mbm_enabled())
+		if (resctrl_is_mbm_enabled(r))
 			cancel_delayed_work_sync(&d->mbm_over);
-		if (resctrl_is_mon_event_enabled(QOS_OCCUP_EVENT_ID))
+		if (resctrl_is_mon_event_enabled(r, QOS_OCCUP_EVENT_ID))
 			cancel_delayed_work_sync(&d->cqm_limbo);
 	}
 
@@ -4581,7 +4581,7 @@ void resctrl_offline_mon_domain(struct rdt_resource *r, struct rdt_domain_hdr *h
 		goto out_unlock;
 
 	d = container_of(hdr, struct rdt_l3_mon_domain, hdr);
-	if (resctrl_is_mon_event_enabled(QOS_OCCUP_EVENT_ID) && has_busy_rmid(d)) {
+	if (resctrl_is_mon_event_enabled(r, QOS_OCCUP_EVENT_ID) && has_busy_rmid(d)) {
 		/*
 		 * When a package is going down, forcefully
 		 * decrement rmid->ebusy. There is no way to know
@@ -4624,14 +4624,14 @@ static int domain_setup_l3_mon_state(struct rdt_resource *r, struct rdt_l3_mon_d
 	enum resctrl_event_id eventid;
 	int idx;
 
-	if (resctrl_is_mon_event_enabled(QOS_OCCUP_EVENT_ID)) {
+	if (resctrl_is_mon_event_enabled(r, QOS_OCCUP_EVENT_ID)) {
 		d->rmid_busy_llc = bitmap_zalloc(idx_limit, GFP_KERNEL);
 		if (!d->rmid_busy_llc)
 			return -ENOMEM;
 	}
 
 	for_each_mbm_event_id(eventid) {
-		if (!resctrl_is_mon_event_enabled(eventid))
+		if (!resctrl_is_mon_event_enabled(r, eventid))
 			continue;
 		idx = MBM_STATE_IDX(eventid);
 		d->mbm_states[idx] = kcalloc(idx_limit, tsize, GFP_KERNEL);
@@ -4639,7 +4639,7 @@ static int domain_setup_l3_mon_state(struct rdt_resource *r, struct rdt_l3_mon_d
 			goto cleanup;
 	}
 
-	if (resctrl_is_mbm_enabled() && r->mon.mbm_cntr_assignable) {
+	if (resctrl_is_mbm_enabled(r) && r->mon.mbm_cntr_assignable) {
 		tsize = sizeof(*d->cntr_cfg);
 		d->cntr_cfg = kcalloc(r->mon.num_mbm_cntrs, tsize, GFP_KERNEL);
 		if (!d->cntr_cfg)
@@ -4691,13 +4691,13 @@ int resctrl_online_mon_domain(struct rdt_resource *r, struct rdt_domain_hdr *hdr
 	if (err)
 		goto out_unlock;
 
-	if (resctrl_is_mbm_enabled()) {
+	if (resctrl_is_mbm_enabled(r)) {
 		INIT_DELAYED_WORK(&d->mbm_over, mbm_handle_overflow);
 		mbm_setup_overflow_handler(d, MBM_OVERFLOW_INTERVAL,
 					   RESCTRL_PICK_ANY_CPU);
 	}
 
-	if (resctrl_is_mon_event_enabled(QOS_OCCUP_EVENT_ID))
+	if (resctrl_is_mon_event_enabled(r, QOS_OCCUP_EVENT_ID))
 		INIT_DELAYED_WORK(&d->cqm_limbo, cqm_handle_limbo);
 
 mkdir:
@@ -4770,13 +4770,13 @@ void resctrl_offline_cpu(unsigned int cpu)
 
 	d = get_mon_domain_from_cpu(cpu, l3);
 	if (d) {
-		if (resctrl_is_mbm_enabled() && cpu == d->mbm_work_cpu) {
+		if (resctrl_is_mbm_enabled(l3) && cpu == d->mbm_work_cpu) {
 			mutex_unlock(&rdtgroup_mutex);
 			cancel_delayed_work_sync(&d->mbm_over);
 			mutex_lock(&rdtgroup_mutex);
 			mbm_setup_overflow_handler(d, 0, cpu);
 		}
-		if (resctrl_is_mon_event_enabled(QOS_OCCUP_EVENT_ID) &&
+		if (resctrl_is_mon_event_enabled(l3, QOS_OCCUP_EVENT_ID) &&
 		    cpu == d->cqm_work_cpu && has_busy_rmid(d)) {
 			mutex_unlock(&rdtgroup_mutex);
 			cancel_delayed_work_sync(&d->cqm_limbo);
