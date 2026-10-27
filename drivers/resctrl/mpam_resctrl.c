@@ -1382,7 +1382,7 @@ static int mpam_resctrl_monitor_init(struct rdt_resource *r,
 		r->mon.mbm_cfg_mask = MAX_EVT_CONFIG_BITS;
 	}
 
-	if (!resctrl_enable_mon_event(type, false, 0, NULL))
+	if (!resctrl_enable_mon_event(r, type, false, 0, NULL))
 		return -EINVAL;
 
 	r->mon_capable = true;
