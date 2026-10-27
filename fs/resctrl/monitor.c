@@ -126,13 +126,13 @@ static void limbo_release_entry(struct rmid_entry *entry)
 
 /*
  * Check the RMIDs that are marked as busy for this domain. If the
- * reported LLC occupancy is below the threshold clear the busy bit and
+ * reported occupancy is below the threshold clear the busy bit and
  * decrement the count. If the busy count gets to zero on an RMID, we
  * free the RMID
  */
 void __check_limbo(struct rdt_l3_mon_domain *d, bool force_free)
 {
-	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+	struct rdt_resource *r = resctrl_arch_get_resource(d->hdr.rid);
 	u32 idx_limit = resctrl_arch_system_num_rmid_idx();
 	struct rmid_entry *entry;
 	bool rmid_dirty = true;
@@ -297,8 +297,8 @@ int alloc_rmid(u32 closid)
 
 static void add_rmid_to_limbo(struct rmid_entry *entry)
 {
-	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
 	struct rdt_l3_mon_domain *d;
+	struct rdt_resource *r;
 	u32 idx;
 
 	lockdep_assert_held(&rdtgroup_mutex);
@@ -309,16 +309,23 @@ static void add_rmid_to_limbo(struct rmid_entry *entry)
 	idx = resctrl_arch_rmid_idx_encode(entry->closid, entry->rmid);
 
 	entry->busy = 0;
-	list_for_each_entry_rcu(d, &r->mon_domains, hdr.list, lockdep_is_cpus_held()) {
-		/*
-		 * For the first limbo RMID in the domain,
-		 * setup up the limbo worker.
-		 */
-		if (!has_busy_rmid(d))
-			cqm_setup_limbo_handler(d, CQM_LIMBOCHECK_INTERVAL,
-						RESCTRL_PICK_ANY_CPU);
-		set_bit(idx, d->rmid_busy_llc);
-		entry->busy++;
+	for_each_mon_capable_rdt_resource(r) {
+		/* Only resources with the occupancy event have a busy bitmap */
+		if (!resctrl_is_mon_event_enabled(r, QOS_OCCUP_EVENT_ID))
+			continue;
+
+		list_for_each_entry_rcu(d, &r->mon_domains, hdr.list,
+					lockdep_is_cpus_held()) {
+			/*
+			 * For the first limbo RMID in the domain,
+			 * setup up the limbo worker.
+			 */
+			if (!has_busy_rmid(d))
+				cqm_setup_limbo_handler(d, CQM_LIMBOCHECK_INTERVAL,
+							RESCTRL_PICK_ANY_CPU);
+			set_bit(idx, d->rmid_busy_llc);
+			entry->busy++;
+		}
 	}
 
 	rmid_limbo_count++;
