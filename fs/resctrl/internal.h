@@ -83,12 +83,13 @@ struct mon_evt {
 	void			*arch_priv;
 };
 
-extern struct mon_evt mon_event_all[QOS_NUM_EVENTS];
+extern struct mon_evt mon_event_all[RDT_NUM_RESOURCES][QOS_NUM_EVENTS];
 
 bool resctrl_is_mon_event_enabled_any(enum resctrl_event_id eventid);
 
-#define for_each_mon_event(mevt) for (mevt = &mon_event_all[QOS_FIRST_EVENT];	\
-				      mevt < &mon_event_all[QOS_NUM_EVENTS]; mevt++)
+#define for_each_mon_event(r, mevt)						\
+	for (mevt = &mon_event_all[(r)->rid][QOS_FIRST_EVENT];			\
+	     mevt < &mon_event_all[(r)->rid][QOS_NUM_EVENTS]; mevt++)
 
 /* Limit for mon_evt::binary_bits */
 #define MAX_BINARY_BITS	27
