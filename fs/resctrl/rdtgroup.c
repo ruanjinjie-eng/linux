@@ -1208,8 +1208,8 @@ static int rdt_mon_features_show(struct kernfs_open_file *of,
 
 	if (!info_kn_lock(of->kn))
 		return -ENOENT;
-	for_each_mon_event(mevt) {
-		if (mevt->rid != r->rid || !mevt->enabled)
+	for_each_mon_event(r, mevt) {
+		if (!mevt->enabled)
 			continue;
 		seq_printf(seq, "%s\n", mevt->name);
 		if (mevt->configurable &&
@@ -2426,8 +2426,8 @@ static int resctrl_mkdir_event_configs(struct rdt_resource *r, struct kernfs_nod
 	if (ret)
 		return ret;
 
-	for_each_mon_event(mevt) {
-		if (mevt->rid != r->rid || !mevt->enabled || !resctrl_is_mbm_event(mevt->evtid))
+	for_each_mon_event(r, mevt) {
+		if (!mevt->enabled || !resctrl_is_mbm_event(mevt->evtid))
 			continue;
 
 		kn_subdir2 = kernfs_create_dir(kn_subdir, mevt->name, kn_subdir->mode, mevt);
@@ -3520,8 +3520,8 @@ static struct kernfs_node *_mkdir_mondata_subdir(struct kernfs_node *parent_kn, 
 	if (ret)
 		goto out_destroy;
 
-	for_each_mon_event(mevt) {
-		if (mevt->rid != r->rid || !mevt->enabled)
+	for_each_mon_event(r, mevt) {
+		if (!mevt->enabled)
 			continue;
 		priv = mon_get_kn_priv(r->rid, domid, mevt, !hdr);
 		if (WARN_ON_ONCE(!priv)) {
