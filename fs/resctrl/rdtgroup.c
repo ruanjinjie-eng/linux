@@ -1927,6 +1927,7 @@ void resctrl_bmec_files_show(struct rdt_resource *r, struct kernfs_node *l3_mon_
 			     bool show)
 {
 	struct kernfs_node *kn_config, *mon_kn = NULL;
+	struct mon_evt *mevt;
 	char name[32];
 
 	if (!l3_mon_kn) {
@@ -1937,14 +1938,15 @@ void resctrl_bmec_files_show(struct rdt_resource *r, struct kernfs_node *l3_mon_
 		l3_mon_kn = mon_kn;
 	}
 
-	kn_config = kernfs_find_and_get(l3_mon_kn, "mbm_total_bytes_config");
-	if (kn_config) {
-		kernfs_show(kn_config, show);
-		kernfs_put(kn_config);
-	}
+	for_each_mon_event(r, mevt) {
+		if (!mevt->configurable)
+			continue;
 
-	kn_config = kernfs_find_and_get(l3_mon_kn, "mbm_local_bytes_config");
-	if (kn_config) {
+		sprintf(name, "%s_config", mevt->name);
+		kn_config = kernfs_find_and_get(l3_mon_kn, name);
+		if (!kn_config)
+			continue;
+
 		kernfs_show(kn_config, show);
 		kernfs_put(kn_config);
 	}
@@ -4605,7 +4607,7 @@ out_unlock:
  * Called when the first CPU of a domain comes online, regardless of whether
  * the filesystem is mounted.
  * During boot this may be called before global allocations have been made by
- * resctrl_l3_mon_resource_init().
+ * resctrl_mon_resource_init().
  *
  * Called during CPU online that may run as soon as CPU online callbacks
  * are set up during resctrl initialization. The number of supported RMIDs
@@ -4802,13 +4804,13 @@ int resctrl_init(void)
 
 	io_alloc_init();
 
-	ret = resctrl_l3_mon_resource_init();
+	ret = resctrl_mon_resource_init();
 	if (ret)
 		return ret;
 
 	ret = sysfs_create_mount_point(fs_kobj, "resctrl");
 	if (ret) {
-		resctrl_l3_mon_resource_exit();
+		resctrl_mon_resource_exit();
 		return ret;
 	}
 
@@ -4843,7 +4845,7 @@ int resctrl_init(void)
 
 cleanup_mountpoint:
 	sysfs_remove_mount_point(fs_kobj, "resctrl");
-	resctrl_l3_mon_resource_exit();
+	resctrl_mon_resource_exit();
 
 	return ret;
 }
@@ -4879,7 +4881,7 @@ static bool resctrl_online_domains_exist(void)
  * When called by the architecture code, all CPUs and resctrl domains must be
  * offline. This ensures the limbo and overflow handlers are not scheduled to
  * run, meaning the data structures they access can be freed by
- * resctrl_l3_mon_resource_exit().
+ * resctrl_mon_resource_exit().
  *
  * After resctrl_exit() returns, the architecture code should return an
  * error from all resctrl_arch_ functions that can do this.
@@ -4906,6 +4908,6 @@ void resctrl_exit(void)
 	 * it can be used to umount resctrl.
 	 */
 
-	resctrl_l3_mon_resource_exit();
+	resctrl_mon_resource_exit();
 	free_rmid_lru_list();
 }
