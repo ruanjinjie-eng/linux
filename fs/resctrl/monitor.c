@@ -571,12 +571,15 @@ static int __l3_mon_event_count_sum(struct rdtgroup *rdtgrp, struct rmid_read *r
 static int __mon_event_count(struct rdtgroup *rdtgrp, struct rmid_read *rr)
 {
 	switch (rr->r->rid) {
+	case RDT_RESOURCE_L2:
 	case RDT_RESOURCE_L3:
 		WARN_ON_ONCE(rr->evt->any_cpu);
 		if (rr->hdr)
 			return __mon_event_count_one_domain(rdtgrp, rr);
-		else
+		if (rr->r->rid == RDT_RESOURCE_L3)
 			return __l3_mon_event_count_sum(rdtgrp, rr);
+		rr->err = -EINVAL;
+		return -EINVAL;
 	case RDT_RESOURCE_PERF_PKG: {
 		u64 tval = 0;
 
@@ -1068,6 +1071,10 @@ struct mon_evt mon_event_all[RDT_NUM_RESOURCES][QOS_NUM_EVENTS] = {
 		MON_EVENT(QOS_OCCUP_EVENT_ID,		"llc_occupancy",	false),
 		MON_EVENT(QOS_MBM_TOTAL_EVENT_ID,	"mbm_total_bytes",	false),
 		MON_EVENT(QOS_MBM_LOCAL_EVENT_ID,	"mbm_local_bytes",	false),
+	},
+	[RDT_RESOURCE_L2] = {
+		MON_EVENT(QOS_OCCUP_EVENT_ID,		"l2c_occupancy",	false),
+		MON_EVENT(QOS_MBM_TOTAL_EVENT_ID,	"mbm_core_bytes",	false),
 	},
 	[RDT_RESOURCE_PERF_PKG] = {
 		MON_EVENT(PMT_EVENT_ENERGY,		"core_energy",	true),
