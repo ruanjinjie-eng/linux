@@ -68,16 +68,16 @@ void resctrl_arch_sync_cpu_closid_rmid(void *info)
  *                              configurable event
  * @evtid: event id.
  *
- * Return: 0 for evtid == QOS_L3_MBM_TOTAL_EVENT_ID
- *         1 for evtid == QOS_L3_MBM_LOCAL_EVENT_ID
+ * Return: 0 for evtid == QOS_MBM_TOTAL_EVENT_ID
+ *         1 for evtid == QOS_MBM_LOCAL_EVENT_ID
  *         INVALID_CONFIG_INDEX for invalid evtid
  */
 static inline unsigned int mon_event_config_index_get(u32 evtid)
 {
 	switch (evtid) {
-	case QOS_L3_MBM_TOTAL_EVENT_ID:
+	case QOS_MBM_TOTAL_EVENT_ID:
 		return 0;
-	case QOS_L3_MBM_LOCAL_EVENT_ID:
+	case QOS_MBM_LOCAL_EVENT_ID:
 		return 1;
 	default:
 		/* Should never reach here */
