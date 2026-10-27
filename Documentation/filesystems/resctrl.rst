@@ -495,6 +495,17 @@ with the following files:
 		bytes) at which a previously used LLC_occupancy
 		counter can be considered for reuse.
 
+If monitoring is available at other cache levels there will be a
+"<LEVEL>_MON" directory for each of them. For example an L2 cache exposes
+"l2c_occupancy" and "mbm_core_bytes" in "L2_MON". These directories have the
+same "num_rmids", "mon_features", "mbm_assign_mode" and
+"max_threshold_occupancy" files as "L3_MON", and when the resource supports
+assignable counters, also "num_mbm_cntrs", "available_mbm_cntrs",
+"mbm_assign_on_mkdir" and "event_configs".
+
+The "mbm_L3_assignments" file in the resource group directories is specific
+to the L3 resource.
+
 If telemetry monitoring is available there will be a "PERF_PKG_MON" directory
 with the following files:
 
