@@ -180,7 +180,7 @@ struct mbm_cntr_cfg {
 };
 
 /**
- * struct rdt_l3_mon_domain - group of CPUs sharing RDT_RESOURCE_L3 monitoring
+ * struct rdt_l3_mon_domain - group of CPUs sharing L2 or L3 cache monitoring
  * @hdr:		common header for different domain types
  * @ci_id:		cache info id for this domain
  * @rmid_busy_llc:	bitmap of which limbo RMIDs are above threshold
