@@ -54,7 +54,8 @@ static inline struct rdt_fs_context *rdt_fc2context(struct fs_context *fc)
 /**
  * struct mon_evt - Properties of a monitor event
  * @evtid:		event id
- * @rid:		resource id for this event
+ * @rid:		resource that implements this event. This is not
+ *			necessarily the scope the event is shown in.
  * @name:		name of the event
  * @evt_cfg:		Event configuration value that represents the
  *			memory transactions (e.g., READS_TO_LOCAL_MEM,
@@ -83,12 +84,51 @@ struct mon_evt {
 	void			*arch_priv;
 };
 
-extern struct mon_evt mon_event_all[QOS_NUM_EVENTS];
+/*
+ * Monitor scopes. A scope is where the counters live, and is what the
+ * "mon_<name>_<id>" directories and the "<NAME>_MON" directories are named
+ * after. The resource that implements an event is recorded in mon_evt::rid
+ * and may be different from the scope, for example "mbm_total_bytes" is
+ * implemented by the memory bandwidth resource but shown at L3 scope.
+ *
+ * SNC slices are domains of the L3 scope, so RESCTRL_L3_NODE maps to the
+ * L3 row.
+ */
+enum resctrl_mon_scope {
+	RESCTRL_MON_SCOPE_L2,
+	RESCTRL_MON_SCOPE_L3,
+	RESCTRL_MON_SCOPE_PACKAGE,
+	RESCTRL_MON_SCOPE_NUM,
+};
+
+static inline int resctrl_mon_scope_id(enum resctrl_scope scope)
+{
+	switch (scope) {
+	case RESCTRL_L2_CACHE:
+		return RESCTRL_MON_SCOPE_L2;
+	case RESCTRL_L3_CACHE:
+	case RESCTRL_L3_NODE:
+		return RESCTRL_MON_SCOPE_L3;
+	case RESCTRL_PACKAGE:
+		return RESCTRL_MON_SCOPE_PACKAGE;
+	default:
+		return -1;
+	}
+}
+
+extern struct mon_evt mon_event_all[RESCTRL_MON_SCOPE_NUM][QOS_NUM_EVENTS];
 
 bool resctrl_is_mon_event_enabled_any(enum resctrl_event_id eventid);
 
-#define for_each_mon_event(mevt) for (mevt = &mon_event_all[QOS_FIRST_EVENT];	\
-				      mevt < &mon_event_all[QOS_NUM_EVENTS]; mevt++)
+static inline struct mon_evt *resctrl_mon_evt(struct rdt_resource *r,
+					      enum resctrl_event_id evtid)
+{
+	return &mon_event_all[resctrl_mon_scope_id(r->mon_scope)][evtid];
+}
+
+#define for_each_mon_event(r, mevt)					\
+	for (mevt = resctrl_mon_evt(r, QOS_FIRST_EVENT);		\
+	     mevt < resctrl_mon_evt(r, QOS_NUM_EVENTS); mevt++)
 
 /* Limit for mon_evt::binary_bits */
 #define MAX_BINARY_BITS	27
