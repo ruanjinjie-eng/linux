@@ -211,6 +211,18 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 		pr_warn("CDP is an expert feature and may cause MPAM to malfunction.\n");
 
 	/*
+	 * Check this before changing any state: if CDP can't be enabled the
+	 * caller must see CDP left off.
+	 */
+	if (enable) {
+		if (mpam_partid_max < 1)
+			return -EINVAL;
+
+		partid_d = resctrl_get_config_index(RESCTRL_RESERVED_CLOSID, CDP_DATA);
+		partid_i = resctrl_get_config_index(RESCTRL_RESERVED_CLOSID, CDP_CODE);
+	}
+
+	/*
 	 * resctrl_arch_set_cdp_enabled() is only called with enable set to
 	 * false on error and unmount.
 	 */
@@ -237,14 +249,6 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 	/* On unmount when CDP is disabled, re-enable MBA */
 	if (!cdp_enabled && mpam_resctrl_controls[RDT_RESOURCE_MBA].class)
 		mpam_resctrl_controls[RDT_RESOURCE_MBA].resctrl_res.alloc_capable = true;
-
-	if (enable) {
-		if (mpam_partid_max < 1)
-			return -EINVAL;
-
-		partid_d = resctrl_get_config_index(RESCTRL_RESERVED_CLOSID, CDP_DATA);
-		partid_i = resctrl_get_config_index(RESCTRL_RESERVED_CLOSID, CDP_CODE);
-	}
 
 	mpam_set_task_partid_pmg(current, partid_d, partid_i, 0, 0);
 	WRITE_ONCE(arm64_mpam_global_default, mpam_get_regval(current));
