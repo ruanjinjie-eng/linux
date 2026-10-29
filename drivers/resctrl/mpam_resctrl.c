@@ -1563,14 +1563,14 @@ void resctrl_arch_reset_all_ctrls(struct rdt_resource *r)
 	mpam_reset_class_locked(res->class);
 }
 
-static void mpam_resctrl_domain_hdr_init(int cpu, struct mpam_component *comp,
+static void mpam_resctrl_domain_hdr_init(int cpu, int id,
 					 enum resctrl_res_level rid,
 					 struct rdt_domain_hdr *hdr)
 {
 	lockdep_assert_cpus_held();
 
 	INIT_LIST_HEAD(&hdr->list);
-	hdr->id = mpam_resctrl_pick_domain_id(cpu, comp);
+	hdr->id = id;
 	hdr->rid = rid;
 	cpumask_set_cpu(cpu, &hdr->cpu_mask);
 }
@@ -1637,6 +1637,43 @@ static struct mpam_component *find_component(struct mpam_class *class, int cpu)
 	return NULL;
 }
 
+/*
+ * Find the domain ID for @cpu from the monitoring components of @r. Also
+ * fill @mon_comp, if not NULL, with the component that covers @cpu for each
+ * event. A negative ID means no component covers this CPU.
+ */
+static int mpam_resctrl_domain_id(int cpu, struct rdt_resource *r,
+				  struct mpam_component **mon_comp)
+{
+	struct mpam_resctrl_mon *mon;
+	enum resctrl_event_id eventid;
+	int id = -1;
+
+	lockdep_assert_cpus_held();
+
+	for_each_mpam_resctrl_mon(mon, r, eventid) {
+		struct mpam_component *comp;
+		int comp_id;
+
+		if (!mon->class)
+			continue;	// dummy resource
+
+		comp = find_component(mon->class, cpu);
+		if (mon_comp)
+			mon_comp[eventid] = comp;
+		if (!comp)
+			continue;
+
+		comp_id = mpam_resctrl_pick_domain_id(cpu, comp);
+		if (id < 0)
+			id = comp_id;
+		else
+			WARN_ON_ONCE(id != comp_id);
+	}
+
+	return id;
+}
+
 static struct mpam_resctrl_dom *
 mpam_resctrl_alloc_domain(unsigned int cpu, struct mpam_resctrl_res *res)
 {
@@ -1672,7 +1709,8 @@ mpam_resctrl_alloc_domain(unsigned int cpu, struct mpam_resctrl_res *res)
 		dom->ctrl_comp = ctrl_comp;
 
 		ctrl_d = &dom->resctrl_ctrl_dom;
-		mpam_resctrl_domain_hdr_init(cpu, ctrl_comp, r->rid, &ctrl_d->hdr);
+		mpam_resctrl_domain_hdr_init(cpu, mpam_resctrl_pick_domain_id(cpu, ctrl_comp),
+					     r->rid, &ctrl_d->hdr);
 		ctrl_d->hdr.type = RESCTRL_CTRL_DOMAIN;
 		err = resctrl_online_ctrl_domain(r, ctrl_d);
 		if (err)
@@ -1684,9 +1722,7 @@ mpam_resctrl_alloc_domain(unsigned int cpu, struct mpam_resctrl_res *res)
 	}
 
 	if (r->mon_capable) {
-		struct mpam_component *any_mon_comp = NULL;
-		struct mpam_resctrl_mon *mon;
-		enum resctrl_event_id eventid;
+		int id;
 
 		/*
 		 * Even if the monitor domain is backed by a different
@@ -1695,26 +1731,14 @@ mpam_resctrl_alloc_domain(unsigned int cpu, struct mpam_resctrl_res *res)
 		 * Search each event's class list for a component with
 		 * overlapping CPUs and set up the dom->mon_comp array.
 		 */
-
-		for_each_mpam_resctrl_mon(mon, r, eventid) {
-			struct mpam_component *mon_comp;
-
-			if (!mon->class)
-				continue;       // dummy resource
-
-			mon_comp = find_component(mon->class, cpu);
-			dom->mon_comp[eventid] = mon_comp;
-			if (mon_comp)
-				any_mon_comp = mon_comp;
-		}
-		if (!any_mon_comp) {
-			WARN_ON_ONCE(0);
+		id = mpam_resctrl_domain_id(cpu, r, dom->mon_comp);
+		if (WARN_ON_ONCE(id < 0)) {
 			err = -EFAULT;
 			goto offline_ctrl_domain;
 		}
 
 		mon_d = &dom->resctrl_mon_dom;
-		mpam_resctrl_domain_hdr_init(cpu, any_mon_comp, r->rid, &mon_d->hdr);
+		mpam_resctrl_domain_hdr_init(cpu, id, r->rid, &mon_d->hdr);
 		mon_d->hdr.type = RESCTRL_MON_DOMAIN;
 		err = resctrl_online_mon_domain(r, &mon_d->hdr);
 		if (err)
