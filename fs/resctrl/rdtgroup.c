@@ -4691,6 +4691,10 @@ int resctrl_online_mon_domain(struct rdt_resource *r, struct rdt_domain_hdr *hdr
 	if (err)
 		goto out_unlock;
 
+	/* The new domain has no counters for the existing groups yet. */
+	if (resctrl_mounted)
+		resctrl_mbm_cntr_assign_domain(r, d);
+
 	if (resctrl_is_mbm_enabled()) {
 		INIT_DELAYED_WORK(&d->mbm_over, mbm_handle_overflow);
 		mbm_setup_overflow_handler(d, MBM_OVERFLOW_INTERVAL,
