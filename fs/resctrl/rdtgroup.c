@@ -3152,13 +3152,25 @@ static void resctrl_unmount(void)
 	cpus_read_lock();
 	mutex_lock(&rdtgroup_mutex);
 
-	rdt_disable_ctx();
-
 	/* Put everything back to default values. */
 	for_each_alloc_capable_rdt_resource(r)
 		resctrl_arch_reset_all_ctrls(r);
 
 	resctrl_fs_teardown();
+
+	/*
+	 * Stop the limbo handler before the CDP state changes: it reads the
+	 * entries' CLOSID, which selects a different PARTID. The entries are
+	 * kept for the next mount so that dirty RMIDs aren't reused.
+	 */
+	resctrl_limbo_pause();
+
+	/*
+	 * Clear the CDP state last. free_rmid() translates between CLOSID and
+	 * PARTID using the CDP state; clearing it first would make the
+	 * translation inconsistent for the RMIDs being torn down.
+	 */
+	rdt_disable_ctx();
 	if (resctrl_arch_alloc_capable())
 		resctrl_arch_disable_alloc();
 	if (resctrl_arch_mon_capable())
@@ -3195,10 +3207,6 @@ static int rdt_get_tree(struct fs_context *fc)
 		goto out;
 	}
 
-	ret = setup_rmid_lru_list();
-	if (ret)
-		goto out;
-
 	ret = rdtgroup_setup_root(ctx);
 	if (ret)
 		goto out;
@@ -3206,6 +3214,11 @@ static int rdt_get_tree(struct fs_context *fc)
 	ret = rdt_enable_ctx(ctx);
 	if (ret)
 		goto out_root;
+
+	/* The limbo state of the previous mount depends on the CDP state. */
+	ret = setup_rmid_lru_list();
+	if (ret)
+		goto out_disable_ctx;
 
 	ret = schemata_list_create();
 	if (ret)
@@ -3310,6 +3323,12 @@ out_closid_exit:
 	closid_exit();
 out_schemata_free:
 	schemata_list_destroy();
+out_disable_ctx:
+	/*
+	 * The mount failed after the limbo handler was restarted: stop it
+	 * again before the CDP state is cleared, as in resctrl_unmount().
+	 */
+	resctrl_limbo_pause();
 	rdt_disable_ctx();
 out_root:
 	rdtgroup_destroy_root();
