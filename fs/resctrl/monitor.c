@@ -71,6 +71,15 @@ static u32 *closid_num_dirty_rmid;
 static unsigned int rmid_limbo_count;
 
 /*
+ * @limbo_paused - The filesystem is unmounted; the limbo handler must not
+ *     read the entries until the next mount has set the CDP state up.
+ * @limbo_cdp - The CDP state the entries in limbo were freed under. An
+ *     entry's CLOSID selects a different PARTID under another CDP state.
+ */
+static bool limbo_paused;
+static bool limbo_cdp;
+
+/*
  * @rmid_entry - The entry in the limbo and free lists.
  */
 static struct rmid_entry	*rmid_ptrs;
@@ -350,6 +359,8 @@ static void add_rmid_to_limbo(struct rmid_entry *entry)
 		entry->busy++;
 	}
 
+	if (!rmid_limbo_count)
+		limbo_cdp = resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L3);
 	rmid_limbo_count++;
 	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID))
 		closid_num_dirty_rmid[entry->closid]++;
@@ -853,6 +864,13 @@ void cqm_handle_limbo(struct work_struct *work)
 	mutex_lock(&rdtgroup_mutex);
 
 	/*
+	 * The limbo state is kept across mounts, but can't be read while
+	 * the filesystem is unmounted: the CDP state may have changed.
+	 */
+	if (limbo_paused)
+		goto out_unlock;
+
+	/*
 	 * Ensure the worker is dedicated to a CPU as intended and not
 	 * relocated by workqueue subsystem as part of CPU going offline.
 	 */
@@ -991,6 +1009,8 @@ void mbm_setup_overflow_handler(struct rdt_l3_mon_domain *dom, unsigned long del
 int setup_rmid_lru_list(void)
 {
 	struct rmid_entry *entry = NULL;
+	struct rdt_l3_mon_domain *d;
+	struct rdt_resource *r;
 	u32 idx_limit;
 	u32 idx;
 	int i;
@@ -1001,11 +1021,37 @@ int setup_rmid_lru_list(void)
 	/*
 	 * Called on every mount, but the number of RMIDs cannot change
 	 * after the first mount, so keep using the same set of rmid_ptrs[]
-	 * until resctrl_exit(). Note that the limbo handler continues to
-	 * access rmid_ptrs[] after resctrl is unmounted.
+	 * until resctrl_exit(). The limbo state is kept too, so that dirty
+	 * RMIDs aren't reused after a quick remount.
 	 */
-	if (rmid_ptrs)
+	if (rmid_ptrs) {
+		r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+
+		/*
+		 * An entry freed under a different CDP state can't be read
+		 * with the new one: its CLOSID selects a different PARTID.
+		 * Release those without reading them.
+		 */
+		if (resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L3) != limbo_cdp) {
+			list_for_each_entry(d, &r->mon_domains, hdr.list) {
+				if (has_busy_rmid(d))
+					release_limbo_rmids(d);
+			}
+		}
+
+		limbo_paused = false;
+
+		/* Restart the handler for the domains that are still busy. */
+		if (resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID)) {
+			list_for_each_entry(d, &r->mon_domains, hdr.list) {
+				if (has_busy_rmid(d))
+					cqm_setup_limbo_handler(d, CQM_LIMBOCHECK_INTERVAL,
+								RESCTRL_PICK_ANY_CPU);
+			}
+		}
+
 		return 0;
+	}
 
 	idx_limit = resctrl_arch_system_num_rmid_idx();
 	rmid_ptrs = kzalloc_objs(struct rmid_entry, idx_limit);
@@ -1030,7 +1076,14 @@ int setup_rmid_lru_list(void)
 	entry = __rmid_entry(idx);
 	list_del(&entry->list);
 
+	limbo_paused = false;
 	return 0;
+}
+
+void resctrl_limbo_pause(void)
+{
+	lockdep_assert_held(&rdtgroup_mutex);
+	limbo_paused = true;
 }
 
 void free_rmid_lru_list(void)
