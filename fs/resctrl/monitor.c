@@ -392,6 +392,41 @@ static int mbm_cntr_get(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 }
 
 /*
+ * mbm_cntr_get_other() - Return the counter ID @rdtgrp uses for @evtid in a
+ *			  domain other than @d.
+ *
+ * Return:
+ * Valid counter ID on success, or -ENOENT on failure.
+ */
+static int mbm_cntr_get_other(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
+			      struct rdtgroup *rdtgrp, enum resctrl_event_id evtid)
+{
+	struct rdt_l3_mon_domain *dom;
+	int cntr_id;
+
+	list_for_each_entry_rcu(dom, &r->mon_domains, hdr.list, lockdep_is_cpus_held()) {
+		if (dom == d)
+			continue;
+
+		cntr_id = mbm_cntr_get(r, dom, rdtgrp, evtid);
+		if (cntr_id >= 0)
+			return cntr_id;
+	}
+
+	return -ENOENT;
+}
+
+/*
+ * mbm_cntr_claim() - Mark the counter @cntr_id in domain @d as used by @rdtgrp.
+ */
+static void mbm_cntr_claim(struct rdt_l3_mon_domain *d, int cntr_id,
+			   struct rdtgroup *rdtgrp, enum resctrl_event_id evtid)
+{
+	d->cntr_cfg[cntr_id].rdtgrp = rdtgrp;
+	d->cntr_cfg[cntr_id].evtid = evtid;
+}
+
+/*
  * mbm_cntr_alloc() - Initialize and return a new counter ID in the domain @d.
  * Caller must ensure that the specified event is not assigned already.
  *
@@ -405,8 +440,7 @@ static int mbm_cntr_alloc(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 
 	for (cntr_id = 0; cntr_id < r->mon.num_mbm_cntrs; cntr_id++) {
 		if (!d->cntr_cfg[cntr_id].rdtgrp) {
-			d->cntr_cfg[cntr_id].rdtgrp = rdtgrp;
-			d->cntr_cfg[cntr_id].evtid = evtid;
+			mbm_cntr_claim(d, cntr_id, rdtgrp, evtid);
 			return cntr_id;
 		}
 	}
@@ -1326,6 +1360,60 @@ void rdtgroup_assign_cntrs(struct rdtgroup *rdtgrp)
 	if (resctrl_is_mon_event_enabled(QOS_L3_MBM_LOCAL_EVENT_ID))
 		rdtgroup_assign_cntr_event(NULL, rdtgrp,
 					   &mon_event_all[QOS_L3_MBM_LOCAL_EVENT_ID]);
+}
+
+/**
+ * resctrl_mbm_cntr_assign_domain() - Assign counters to the existing groups on
+ *				      a monitor domain that has just come online.
+ * @r:	The resource the domain belongs to.
+ * @d:	The domain that has just come online.
+ *
+ * A new domain has no counters assigned, and on some architectures the user
+ * has no way to assign them. Give each group the counter ID it already has in
+ * another domain so that a group uses the same counter ID everywhere, and
+ * allocate a free one only when the group has none yet.
+ *
+ * Called with rdtgroup_mutex held while resctrl is mounted.
+ */
+void resctrl_mbm_cntr_assign_domain(struct rdt_resource *r, struct rdt_l3_mon_domain *d)
+{
+	struct rdtgroup *rdtgrp;
+	struct mon_evt *mevt;
+
+	if (!resctrl_arch_mbm_cntr_assign_enabled(r))
+		return;
+
+	lockdep_assert_held(&rdtgroup_mutex);
+
+	list_for_each_entry(rdtgrp, &rdt_all_groups, rdtgroup_list) {
+		for_each_mon_event(mevt) {
+			int cntr_id;
+
+			if (!mevt->enabled || !resctrl_is_mbm_event(mevt->evtid))
+				continue;
+
+			if (mbm_cntr_get(r, d, rdtgrp, mevt->evtid) >= 0)
+				continue;
+
+			cntr_id = mbm_cntr_get_other(r, d, rdtgrp, mevt->evtid);
+			if (cntr_id >= 0 && d->cntr_cfg[cntr_id].rdtgrp)
+				cntr_id = -ENOENT;
+
+			if (cntr_id >= 0) {
+				mbm_cntr_claim(d, cntr_id, rdtgrp, mevt->evtid);
+			} else {
+				/* The group has no counter yet, use the mkdir policy. */
+				if (!r->mon.mbm_assign_on_mkdir)
+					continue;
+				cntr_id = mbm_cntr_alloc(r, d, rdtgrp, mevt->evtid);
+				if (cntr_id < 0)
+					continue;
+			}
+
+			rdtgroup_assign_cntr(r, d, mevt->evtid, rdtgrp->mon.rmid,
+					     rdtgrp->closid, cntr_id, true);
+		}
+	}
 }
 
 /*
