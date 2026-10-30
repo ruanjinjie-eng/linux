@@ -71,6 +71,11 @@ static u32 *closid_num_dirty_rmid;
 static unsigned int rmid_limbo_count;
 
 /*
+ * @limbo_cdp - The CDP state under which the RMIDs in limbo were freed.
+ */
+static bool limbo_cdp;
+
+/*
  * @rmid_entry - The entry in the limbo and free lists.
  */
 static struct rmid_entry	*rmid_ptrs;
@@ -852,6 +857,10 @@ void cqm_handle_limbo(struct work_struct *work)
 	 */
 	mutex_lock(&rdtgroup_mutex);
 
+	/* Don't read the RMIDs in limbo until a mount sets up the CDP state. */
+	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID) && !resctrl_mounted)
+		goto out_unlock;
+
 	/*
 	 * Ensure the worker is dedicated to a CPU as intended and not
 	 * relocated by workqueue subsystem as part of CPU going offline.
@@ -868,10 +877,12 @@ void cqm_handle_limbo(struct work_struct *work)
 	__check_limbo(d);
 
 	if (has_busy_rmid(d)) {
-		d->cqm_work_cpu = cpumask_any_housekeeping(&d->hdr.cpu_mask,
-							   RESCTRL_PICK_ANY_CPU);
-		schedule_delayed_work_on(d->cqm_work_cpu, &d->cqm_limbo,
-					 delay);
+		int cpu;
+
+		cpu = cpumask_any_housekeeping(&d->hdr.cpu_mask,
+					       RESCTRL_PICK_ANY_CPU);
+		if (schedule_delayed_work_on(cpu, &d->cqm_limbo, delay))
+			d->cqm_work_cpu = cpu;
 	}
 
 out_unlock:
@@ -893,10 +904,13 @@ void cqm_setup_limbo_handler(struct rdt_l3_mon_domain *dom, unsigned long delay_
 	int cpu;
 
 	cpu = cpumask_any_housekeeping(&dom->hdr.cpu_mask, exclude_cpu);
-	dom->cqm_work_cpu = cpu;
+	if (cpu >= nr_cpu_ids) {
+		dom->cqm_work_cpu = cpu;
+		return;
+	}
 
-	if (cpu < nr_cpu_ids)
-		schedule_delayed_work_on(cpu, &dom->cqm_limbo, delay);
+	if (schedule_delayed_work_on(cpu, &dom->cqm_limbo, delay))
+		dom->cqm_work_cpu = cpu;
 }
 
 void mbm_handle_overflow(struct work_struct *work)
@@ -1031,6 +1045,49 @@ int setup_rmid_lru_list(void)
 	list_del(&entry->list);
 
 	return 0;
+}
+
+/**
+ * resctrl_limbo_resume() - Resume RMID limbo handling after a mount.
+ *
+ * Release the RMIDs that were freed under another CDP state without
+ * reading them, and restart the limbo handler.
+ */
+void resctrl_limbo_resume(void)
+{
+	struct rdt_l3_mon_domain *d;
+	struct rdt_resource *r;
+	bool cdp;
+
+	if (!IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID) ||
+	    !resctrl_arch_mon_capable())
+		return;
+
+	lockdep_assert_held(&rdtgroup_mutex);
+
+	r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+
+	cdp = resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L2) ||
+	      resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L3);
+
+	if (cdp != limbo_cdp) {
+		list_for_each_entry_rcu(d, &r->mon_domains, hdr.list,
+					lockdep_is_cpus_held()) {
+			if (d->rmid_busy_llc && has_busy_rmid(d))
+				release_limbo_rmids(d);
+		}
+	}
+	limbo_cdp = cdp;
+
+	if (!resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID))
+		return;
+
+	list_for_each_entry_rcu(d, &r->mon_domains, hdr.list,
+				lockdep_is_cpus_held()) {
+		/* A queued worker will run, don't move its cqm_work_cpu. */
+		if (has_busy_rmid(d) && !delayed_work_pending(&d->cqm_limbo))
+			cqm_setup_limbo_handler(d, 0, RESCTRL_PICK_ANY_CPU);
+	}
 }
 
 void free_rmid_lru_list(void)

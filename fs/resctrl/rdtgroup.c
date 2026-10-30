@@ -3150,13 +3150,14 @@ static void resctrl_unmount(void)
 	cpus_read_lock();
 	mutex_lock(&rdtgroup_mutex);
 
-	rdt_disable_ctx();
-
 	/* Put everything back to default values. */
 	for_each_alloc_capable_rdt_resource(r)
 		resctrl_arch_reset_all_ctrls(r);
 
 	resctrl_fs_teardown();
+
+	/* Remove the groups under the CDP state they were set up with. */
+	rdt_disable_ctx();
 	if (resctrl_arch_alloc_capable())
 		resctrl_arch_disable_alloc();
 	if (resctrl_arch_mon_capable())
@@ -3260,6 +3261,8 @@ static int rdt_get_tree(struct fs_context *fc)
 			mbm_setup_overflow_handler(dom, MBM_OVERFLOW_INTERVAL,
 						   RESCTRL_PICK_ANY_CPU);
 	}
+
+	resctrl_limbo_resume();
 
 	/*
 	 * Ensure root remains accessible after mutex is unlocked so that
