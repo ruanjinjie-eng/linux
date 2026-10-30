@@ -426,6 +426,44 @@ static int mbm_cntr_get(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 }
 
 /*
+ * Return the counter ID @rdtgrp uses for @evtid in a domain other than @d,
+ * taken from the first domain that has one. Counters are allocated on every
+ * domain together, so a group usually has the same ID everywhere. MPAM relies
+ * on this as it maps a counter ID to one monitor for the whole resource; x86
+ * does not. @d is skipped in case it is already on the list.
+ *
+ * Return:
+ * Valid counter ID on success, or -ENOENT on failure.
+ */
+static int mbm_cntr_get_other(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
+			      struct rdtgroup *rdtgrp, enum resctrl_event_id evtid)
+{
+	struct rdt_l3_mon_domain *dom;
+	int cntr_id;
+
+	list_for_each_entry_rcu(dom, &r->mon_domains, hdr.list, lockdep_is_cpus_held()) {
+		if (dom == d)
+			continue;
+
+		cntr_id = mbm_cntr_get(r, dom, rdtgrp, evtid);
+		if (cntr_id >= 0)
+			return cntr_id;
+	}
+
+	return -ENOENT;
+}
+
+/*
+ * mbm_cntr_claim() - Mark the counter @cntr_id in domain @d as used by @rdtgrp.
+ */
+static void mbm_cntr_claim(struct rdt_l3_mon_domain *d, int cntr_id,
+			   struct rdtgroup *rdtgrp, enum resctrl_event_id evtid)
+{
+	d->cntr_cfg[cntr_id].rdtgrp = rdtgrp;
+	d->cntr_cfg[cntr_id].evtid = evtid;
+}
+
+/*
  * mbm_cntr_alloc() - Initialize and return a new counter ID in the domain @d.
  * Caller must ensure that the specified event is not assigned already.
  *
@@ -439,8 +477,7 @@ static int mbm_cntr_alloc(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 
 	for (cntr_id = 0; cntr_id < r->mon.num_mbm_cntrs; cntr_id++) {
 		if (!d->cntr_cfg[cntr_id].rdtgrp) {
-			d->cntr_cfg[cntr_id].rdtgrp = rdtgrp;
-			d->cntr_cfg[cntr_id].evtid = evtid;
+			mbm_cntr_claim(d, cntr_id, rdtgrp, evtid);
 			return cntr_id;
 		}
 	}
@@ -1412,6 +1449,82 @@ void rdtgroup_assign_cntrs(struct rdtgroup *rdtgrp)
 	if (resctrl_is_mon_event_enabled(QOS_L3_MBM_LOCAL_EVENT_ID))
 		rdtgroup_assign_cntr_event(NULL, rdtgrp,
 					   &mon_event_all[QOS_L3_MBM_LOCAL_EVENT_ID]);
+}
+
+/*
+ * Give @rdtgrp the counter IDs it uses on the other domains, on @d.
+ */
+static void resctrl_mbm_cntr_assign_group(struct rdt_resource *r,
+					  struct rdt_l3_mon_domain *d,
+					  struct rdtgroup *rdtgrp)
+{
+	struct mon_evt *mevt;
+
+	/* Pseudo-locked groups have no RMID and are not monitored. */
+	if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP ||
+	    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED)
+		return;
+
+	for_each_mon_event(mevt) {
+		int cntr_id;
+
+		if (mevt->rid != r->rid || !mevt->enabled ||
+		    !resctrl_is_mbm_event(mevt->evtid))
+			continue;
+
+		if (mbm_cntr_get(r, d, rdtgrp, mevt->evtid) >= 0)
+			continue;
+
+		/* A group without a counter on any domain stays unassigned. */
+		cntr_id = mbm_cntr_get_other(r, d, rdtgrp, mevt->evtid);
+		if (cntr_id < 0)
+			continue;
+
+		/*
+		 * Allocating a different ID would change the group's mapping for
+		 * the whole resource on MPAM, so leave the event unassigned.
+		 */
+		if (d->cntr_cfg[cntr_id].rdtgrp) {
+			pr_warn_ratelimited("Counter %d for %s is in use in domain %d\n",
+					    cntr_id, mevt->name, d->hdr.id);
+			continue;
+		}
+
+		mbm_cntr_claim(d, cntr_id, rdtgrp, mevt->evtid);
+		rdtgroup_assign_cntr(r, d, mevt->evtid, rdtgrp->mon.rmid,
+				     rdtgrp->closid, cntr_id, true);
+	}
+}
+
+/**
+ * resctrl_mbm_cntr_assign_domain() - Assign counters to the existing groups on
+ *				      a monitor domain that has just come online.
+ * @r:	The resource the domain belongs to.
+ * @d:	The domain that has just come online.
+ *
+ * A new domain has no counters assigned. Give each group, including the
+ * monitor groups below a control group, the counter IDs it uses in the other
+ * domains. A group that has no counter for an event in any domain stays
+ * unassigned: mbm_assign_on_mkdir only applies when a group is created, and
+ * counters that the user removed through mbm_L3_assignments stay removed.
+ *
+ * Called with rdtgroup_mutex held while resctrl is mounted.
+ */
+void resctrl_mbm_cntr_assign_domain(struct rdt_resource *r, struct rdt_l3_mon_domain *d)
+{
+	struct rdtgroup *prgrp, *crgrp;
+
+	if (!resctrl_arch_mbm_cntr_assign_enabled(r))
+		return;
+
+	lockdep_assert_held(&rdtgroup_mutex);
+
+	list_for_each_entry(prgrp, &rdt_all_groups, rdtgroup_list) {
+		resctrl_mbm_cntr_assign_group(r, d, prgrp);
+
+		list_for_each_entry(crgrp, &prgrp->mon.crdtgrp_list, mon.crdtgrp_list)
+			resctrl_mbm_cntr_assign_group(r, d, crgrp);
+	}
 }
 
 /*
