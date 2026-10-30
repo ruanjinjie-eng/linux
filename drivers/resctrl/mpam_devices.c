@@ -161,6 +161,18 @@ static DEFINE_SPINLOCK(partid_max_lock);
 static u32 mpam_num_closid;
 static u32 mpam_num_partid;
 
+void mpam_partid_map_init(u32 num_partid, u32 num_closid)
+{
+	mpam_num_partid = num_partid;
+	mpam_num_closid = num_closid;
+}
+
+void mpam_partid_map_exit(void)
+{
+	mpam_num_closid = 0;
+	mpam_num_partid = 0;
+}
+
 /*
  * Map a request PARTID onto its owning control group using modulo
  * interleaving. Without resctrl active, every PARTID maps 1:1 onto itself.
@@ -1153,6 +1165,9 @@ static int mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 	 * A RIS that implements PARTID narrowing has one configuration per
 	 * internal PARTID, and several request PARTIDs share it. Record both
 	 * limits in the resource properties.
+	 * Keep msc->partid_max at the full request PARTID range. The resctrl
+	 * glue code will broadcast a control group's configuration to every
+	 * request PARTID that maps onto that group's internal PARTID.
 	 */
 	props->partid_max = msc->partid_max;
 	props->intpartid_max = msc->partid_max;
@@ -1169,7 +1184,6 @@ static int mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 
 		mpam_set_feature(mpam_feat_partid_nrw, props);
 		props->intpartid_max = min(props->intpartid_max, intpartid_max);
-		msc->partid_max = min(msc->partid_max, intpartid_max);
 	}
 
 	return 0;
@@ -1877,6 +1891,15 @@ static int mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 		/* Update the intpartid mapping */
 		u16 intpartid = mpam_partid_to_intpartid(partid);
 
+		/*
+		 * Without resctrl managing the mapping, the fallback maps
+		 * every PARTID 1:1, which can exceed the internal PARTID
+		 * range. Wrap onto an internal PARTID, like the narrowing
+		 * mapping resctrl programs.
+		 */
+		if (intpartid > rprops->intpartid_max)
+			intpartid %= (u32)rprops->intpartid_max + 1;
+
 		ret = mpam_write_partsel_reg(msc, INTPARTID,
 					     MPAMCFG_INTPARTID_INTERNAL | intpartid);
 		if (ret)
@@ -2186,12 +2209,23 @@ struct mpam_write_config_arg {
 static int __write_config(void *arg)
 {
 	struct mpam_write_config_arg *c = arg;
+	struct mpam_config reset_cfg = {};
 	u32 partid;
 	int ret;
 
 	if (!mpam_num_closid)
 		return mpam_reprogram_ris_partid(c->ris, c->partid,
 						 &c->comp->cfg[c->partid]);
+
+	/*
+	 * Request PARTIDs above the control group count exist when the
+	 * expansion is blocked. They have no group configuration, so
+	 * initialise them rather than leaving them as they were.
+	 */
+	if (c->partid >= mpam_num_partid) {
+		mpam_reprogram_ris_partid(c->ris, c->partid, &reset_cfg);
+		return 0;
+	}
 
 	/* c->partid is the control group, and must be a valid one. */
 	WARN_ON_ONCE(c->partid >= mpam_num_closid);
@@ -2252,6 +2286,20 @@ static void mpam_reprogram_msc(struct mpam_msc *msc)
 
 			arg.partid = partid;
 			mpam_touch_msc(msc, __write_config, &arg);
+		}
+
+		/*
+		 * When the expansion is blocked the request PARTID range is
+		 * larger than the control group count. Initialise the
+		 * remaining request PARTIDs too.
+		 */
+		if (mpam_num_closid &&
+		    mpam_num_partid < mpam_partid_max + 1) {
+			for (partid = mpam_num_partid;
+			     partid <= mpam_partid_max; partid++) {
+				arg.partid = partid;
+				mpam_touch_msc(msc, __write_config, &arg);
+			}
 		}
 		ris->in_reset_state = reset;
 
