@@ -4341,6 +4341,7 @@ static void mongrp_reparent(struct rdtgroup *rdtgrp,
 			    cpumask_var_t cpus)
 {
 	struct rdtgroup *prdtgrp = rdtgrp->mon.parent;
+	struct rdtgroup old_rdtgrp = *rdtgrp;
 
 	WARN_ON(rdtgrp->type != RDTMON_GROUP);
 	WARN_ON(new_prdtgrp->type != RDTCTRL_GROUP);
@@ -4357,7 +4358,7 @@ static void mongrp_reparent(struct rdtgroup *rdtgrp,
 	rdtgrp->closid = new_prdtgrp->closid;
 
 	/* Propagate updated closid to all tasks in this group. */
-	rdt_move_group_tasks(rdtgrp, rdtgrp, cpus);
+	rdt_move_group_tasks(&old_rdtgrp, rdtgrp, cpus);
 
 	update_closid_rmid(cpus, NULL);
 }
