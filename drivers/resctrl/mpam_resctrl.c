@@ -634,8 +634,17 @@ void resctrl_arch_reset_cntr(struct rdt_resource *r, struct rdt_l3_mon_domain *d
  * The rmid realloc threshold should be for the smallest cache exposed to
  * resctrl.
  */
+
+/* A cache class backs the resctrl resource of its level, L2 or L3. */
+static enum resctrl_res_level mpam_class_rid(struct mpam_class *class)
+{
+	return class->level == 2 ? RDT_RESOURCE_L2 : RDT_RESOURCE_L3;
+}
+
 static int update_rmid_limits(struct mpam_class *class)
 {
+	enum resctrl_res_level rid = mpam_class_rid(class);
+	struct rdt_resource *r = resctrl_arch_get_resource(rid);
 	u32 num_unique_pmg = resctrl_arch_system_num_rmid_idx();
 	struct mpam_props *cprops = &class->props;
 	struct cacheinfo *ci;
@@ -657,10 +666,10 @@ static int update_rmid_limits(struct mpam_class *class)
 		return -EINVAL;
 	}
 
-	if (!resctrl_rmid_realloc_limit ||
-	    ci->size < resctrl_rmid_realloc_limit) {
-		resctrl_rmid_realloc_limit = ci->size;
-		resctrl_rmid_realloc_threshold = ci->size / num_unique_pmg;
+	if (!r->mon.rmid_realloc_limit ||
+	    ci->size < r->mon.rmid_realloc_limit) {
+		r->mon.rmid_realloc_limit = ci->size;
+		r->mon.rmid_realloc_threshold = ci->size / num_unique_pmg;
 	}
 
 	return 0;

@@ -65,8 +65,8 @@ static u32 *closid_num_dirty_rmid;
  * @rmid_limbo_count - count of currently unused but (potentially)
  *     dirty RMIDs.
  *     This counts RMIDs that no one is currently using but that
- *     may have a occupancy value > resctrl_rmid_realloc_threshold. User can
- *     change the threshold occupancy value.
+ *     may have a occupancy value above the resource's reallocation
+ *     threshold. User can change the threshold occupancy value.
  */
 static unsigned int rmid_limbo_count;
 
@@ -74,17 +74,6 @@ static unsigned int rmid_limbo_count;
  * @rmid_entry - The entry in the limbo and free lists.
  */
 static struct rmid_entry	*rmid_ptrs;
-
-/*
- * This is the threshold cache occupancy in bytes at which we will consider an
- * RMID available for re-allocation.
- */
-unsigned int resctrl_rmid_realloc_threshold;
-
-/*
- * This is the maximum value for the reallocation threshold, in bytes.
- */
-unsigned int resctrl_rmid_realloc_limit;
 
 /*
  * x86 and arm64 differ in their handling of monitoring.
@@ -167,7 +156,7 @@ void __check_limbo(struct rdt_l3_mon_domain *d, bool force_free)
 						   arch_priv, &val, arch_mon_ctx)) {
 				rmid_dirty = true;
 			} else {
-				rmid_dirty = (val >= resctrl_rmid_realloc_threshold);
+				rmid_dirty = (val >= r->mon.rmid_realloc_threshold);
 
 				/*
 				 * x86's CLOSID and RMID are independent numbers,

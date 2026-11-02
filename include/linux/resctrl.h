@@ -288,6 +288,10 @@ enum resctrl_schema_fmt {
 /**
  * struct resctrl_mon - Monitoring related data of a resctrl resource.
  * @num_rmid:			Number of RMIDs available.
+ * @rmid_realloc_limit:		Largest value for the reallocation threshold,
+ *				in bytes.
+ * @rmid_realloc_threshold:	Cache occupancy in bytes at which an RMID is
+ *				considered available for re-allocation.
  * @mbm_cfg_mask:		Memory transactions that can be tracked when
  *				bandwidth monitoring events can be configured.
  * @num_mbm_cntrs:		Number of assignable counters.
@@ -299,6 +303,8 @@ enum resctrl_schema_fmt {
  */
 struct resctrl_mon {
 	u32			num_rmid;
+	unsigned int		rmid_realloc_limit;
+	unsigned int		rmid_realloc_threshold;
 	unsigned int		mbm_cfg_mask;
 	int			num_mbm_cntrs;
 	bool			mbm_cntr_assignable;
@@ -725,9 +731,6 @@ int resctrl_arch_io_alloc_enable(struct rdt_resource *r, bool enable);
  * true if io_alloc is enabled or false if disabled.
  */
 bool resctrl_arch_get_io_alloc_enabled(struct rdt_resource *r);
-
-extern unsigned int resctrl_rmid_realloc_threshold;
-extern unsigned int resctrl_rmid_realloc_limit;
 
 int resctrl_init(void);
 void resctrl_exit(void);
