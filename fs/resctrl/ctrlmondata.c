@@ -367,8 +367,11 @@ ssize_t rdtgroup_schemata_write(struct kernfs_open_file *of,
 			continue;
 
 		ret = resctrl_arch_update_domains(r, rdtgrp->closid);
-		if (ret)
+		if (ret) {
+			rdt_last_cmd_printf("%s: failed to update the domains: %pe\n",
+					    r->name, ERR_PTR(ret));
 			goto out_clear_staged;
+		}
 	}
 
 	if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
