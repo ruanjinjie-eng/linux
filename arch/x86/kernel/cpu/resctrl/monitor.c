@@ -425,7 +425,7 @@ int __init rdt_get_l3_mon_config(struct rdt_resource *r)
 
 	snc_nodes_per_l3_cache = snc_get_config();
 
-	resctrl_rmid_realloc_limit = boot_cpu_data.x86_cache_size * 1024;
+	r->mon.rmid_realloc_limit = boot_cpu_data.x86_cache_size * 1024;
 	hw_res->mon_scale = boot_cpu_data.x86_cache_occ_scale / snc_nodes_per_l3_cache;
 	r->mon.num_rmid = (boot_cpu_data.x86_cache_max_rmid + 1) / snc_nodes_per_l3_cache;
 	hw_res->mbm_width = MBM_CNTR_WIDTH_BASE;
@@ -442,14 +442,14 @@ int __init rdt_get_l3_mon_config(struct rdt_resource *r)
 	 *
 	 * For a 35MB LLC and 56 RMIDs, this is ~1.8% of the LLC.
 	 */
-	threshold = resctrl_rmid_realloc_limit / r->mon.num_rmid;
+	threshold = r->mon.rmid_realloc_limit / r->mon.num_rmid;
 
 	/*
 	 * Because num_rmid may not be a power of two, round the value
 	 * to the nearest multiple of hw_res->mon_scale so it matches a
 	 * value the hardware will measure. mon_scale may not be a power of 2.
 	 */
-	resctrl_rmid_realloc_threshold = resctrl_arch_round_mon_val(threshold);
+	r->mon.rmid_realloc_threshold = resctrl_arch_round_mon_val(threshold);
 
 	if (rdt_cpu_has(X86_FEATURE_BMEC) || rdt_cpu_has(X86_FEATURE_ABMC)) {
 		/* Detect list of bandwidth sources that can be tracked */

@@ -1255,9 +1255,11 @@ static int rdt_delay_linear_show(struct kernfs_open_file *of,
 static int max_threshold_occ_show(struct kernfs_open_file *of,
 				  struct seq_file *seq, void *v)
 {
+	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
+
 	if (!info_kn_lock(of->kn))
 		return -ENOENT;
-	seq_printf(seq, "%u\n", resctrl_rmid_realloc_threshold);
+	seq_printf(seq, "%u\n", r->mon.rmid_realloc_threshold);
 	info_kn_unlock(of->kn);
 
 	return 0;
@@ -1295,6 +1297,7 @@ static int rdt_thread_throttle_mode_show(struct kernfs_open_file *of,
 static ssize_t max_threshold_occ_write(struct kernfs_open_file *of,
 				       char *buf, size_t nbytes, loff_t off)
 {
+	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
 	unsigned int bytes;
 	int ret;
 
@@ -1309,14 +1312,14 @@ static ssize_t max_threshold_occ_write(struct kernfs_open_file *of,
 		goto out_unlock;
 	}
 
-	if (bytes > resctrl_rmid_realloc_limit) {
+	if (bytes > r->mon.rmid_realloc_limit) {
 		rdt_last_cmd_printf("max_threshold_occupancy: Exceeds limit (before adjustment) of %u bytes\n",
-				    resctrl_rmid_realloc_limit);
+				    r->mon.rmid_realloc_limit);
 		ret = -EINVAL;
 		goto out_unlock;
 	}
 
-	resctrl_rmid_realloc_threshold = resctrl_arch_round_mon_val(bytes);
+	r->mon.rmid_realloc_threshold = resctrl_arch_round_mon_val(bytes);
 
 out_unlock:
 	info_kn_unlock(of->kn);
