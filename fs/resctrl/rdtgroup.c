@@ -4338,10 +4338,12 @@ out:
  */
 static void mongrp_reparent(struct rdtgroup *rdtgrp,
 			    struct rdtgroup *new_prdtgrp,
-			    cpumask_var_t cpus)
+			    cpumask_var_t cpus, int new_rmid)
 {
 	struct rdtgroup *prdtgrp = rdtgrp->mon.parent;
 	struct rdtgroup old_rdtgrp = *rdtgrp;
+	u32 old_closid = rdtgrp->closid;
+	u32 old_rmid = rdtgrp->mon.rmid;
 
 	WARN_ON(rdtgrp->type != RDTMON_GROUP);
 	WARN_ON(new_prdtgrp->type != RDTCTRL_GROUP);
@@ -4354,13 +4356,24 @@ static void mongrp_reparent(struct rdtgroup *rdtgrp,
 	list_move_tail(&rdtgrp->mon.crdtgrp_list,
 		       &new_prdtgrp->mon.crdtgrp_list);
 
+	/* The MBM counters are programmed with the old CLOSID and RMID. */
+	if (new_rmid >= 0)
+		rdtgroup_unassign_cntrs(rdtgrp);
+
 	rdtgrp->mon.parent = new_prdtgrp;
 	rdtgrp->closid = new_prdtgrp->closid;
+	if (new_rmid >= 0)
+		rdtgrp->mon.rmid = new_rmid;
 
 	/* Propagate updated closid to all tasks in this group. */
 	rdt_move_group_tasks(&old_rdtgrp, rdtgrp, cpus);
 
 	update_closid_rmid(cpus, NULL);
+
+	if (new_rmid >= 0) {
+		rdtgroup_assign_cntrs(rdtgrp);
+		free_rmid(old_closid, old_rmid);
+	}
 }
 
 static int rdtgroup_rename(struct kernfs_node *kn,
@@ -4370,6 +4383,7 @@ static int rdtgroup_rename(struct kernfs_node *kn,
 	struct rdtgroup *new_prdtgrp;
 	struct rdtgroup *rdtgrp;
 	cpumask_var_t tmpmask;
+	int new_rmid = -1;
 	int ret;
 
 	rdtgrp = kernfs_to_rdtgroup(kn);
@@ -4381,6 +4395,8 @@ static int rdtgroup_rename(struct kernfs_node *kn,
 	rdtgroup_kn_get(rdtgrp, kn);
 	rdtgroup_kn_get(new_prdtgrp, new_parent);
 
+	/* Same order as rdtgroup_kn_lock_live(): CPU hotplug lock first. */
+	cpus_read_lock();
 	mutex_lock(&rdtgroup_mutex);
 
 	rdt_last_cmd_clear();
@@ -4438,6 +4454,25 @@ static int rdtgroup_rename(struct kernfs_node *kn,
 	}
 
 	/*
+	 * The RMID identifies the group's monitoring state. Where it only has
+	 * meaning together with the CLOSID, moving the group to another
+	 * control group changes it: reserve an RMID for the new CLOSID before
+	 * renaming, so a shortage can be reported cleanly.
+	 */
+	if (rdtgrp->mon.parent != new_prdtgrp &&
+	    resctrl_arch_rmid_idx_encode(rdtgrp->closid, rdtgrp->mon.rmid) !=
+	    resctrl_arch_rmid_idx_encode(new_prdtgrp->closid, rdtgrp->mon.rmid)) {
+		new_rmid = alloc_rmid(new_prdtgrp->closid);
+		if (new_rmid < 0) {
+			rdt_last_cmd_printf("Unable to allocate an RMID for the new control group: %pe\n",
+					    ERR_PTR(new_rmid));
+			ret = new_rmid;
+			free_cpumask_var(tmpmask);
+			goto out;
+		}
+	}
+
+	/*
 	 * Perform all input validation and allocations needed to ensure
 	 * mongrp_reparent() will succeed before calling kernfs_rename(),
 	 * otherwise it would be necessary to revert this call if
@@ -4445,12 +4480,15 @@ static int rdtgroup_rename(struct kernfs_node *kn,
 	 */
 	ret = kernfs_rename(kn, new_parent, new_name);
 	if (!ret)
-		mongrp_reparent(rdtgrp, new_prdtgrp, tmpmask);
+		mongrp_reparent(rdtgrp, new_prdtgrp, tmpmask, new_rmid);
+	else if (new_rmid >= 0)
+		free_rmid(new_prdtgrp->closid, new_rmid);
 
 	free_cpumask_var(tmpmask);
 
 out:
 	mutex_unlock(&rdtgroup_mutex);
+	cpus_read_unlock();
 	rdtgroup_kn_put(rdtgrp, kn);
 	rdtgroup_kn_put(new_prdtgrp, new_parent);
 	return ret;
