@@ -250,6 +250,10 @@ enum membw_throttle_mode {
  * @bw_gran:		Granularity at which the memory bandwidth is allocated
  * @delay_linear:	True if memory B/W delay is in linear scale
  * @arch_needs_linear:	True if we can't configure non-linear resources
+ * @max_is_soft_limit:	True if the maximum control only marks traffic as low
+ *			priority. Requests above the maximum are then still
+ *			serviced when no other request is waiting, so the software
+ *			controller cannot keep bandwidth below a target.
  * @throttle_mode:	Bandwidth throttling mode when threads request
  *			different memory bandwidths
  * @mba_sc:		True if MBA software controller(mba_sc) is enabled
@@ -261,6 +265,7 @@ struct resctrl_membw {
 	u32				bw_gran;
 	u32				delay_linear;
 	bool				arch_needs_linear;
+	bool				max_is_soft_limit;
 	enum membw_throttle_mode	throttle_mode;
 	bool				mba_sc;
 	u32				*mb_map;

@@ -47,7 +47,11 @@ mount options are:
 	Enable code/data prioritization in L2 cache allocations.
 "mba_MBps":
 	Enable the MBA Software Controller(mba_sc) to specify MBA
-	bandwidth in MiBps. On architectures that assign MBM counters to
+	bandwidth in MiBps. Refused when the maximum bandwidth control is
+	only a soft limit: requests above the maximum are then still
+	serviced when no other request is waiting, so the software
+	controller cannot keep the bandwidth below the value written to
+	the schemata file. On architectures that assign MBM counters to
 	monitoring groups the default counter assignment mode is used
 	while the controller is enabled, and the number of monitoring
 	groups may be limited to the number of counters.
