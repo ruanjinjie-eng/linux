@@ -1025,8 +1025,22 @@ static int mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 		 */
 		props->bwa_wd = min(props->bwa_wd, 16);
 
-		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MAX, mbw_features))
+		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MAX, mbw_features)) {
+			/*
+			 * MAX_LIM: 0b00 both limits, 0b01 the soft limit
+			 * only, 0b10 the hard limit only. 0b11 is reserved;
+			 * treat it as the soft limit only so the software
+			 * controller is refused rather than rely on an
+			 * unknown limit behavior.
+			 */
+			props->max_lim = FIELD_GET(MPAMF_MBW_IDR_MAX_LIM, mbw_features);
+			if (props->max_lim == 3)
+				props->max_lim = 1;
+
 			mpam_set_feature(mpam_feat_mbw_max, props);
+			/* The hard-limit bit is a configuration bit. */
+			mpam_set_feature(mpam_feat_max_limit, props);
+		}
 
 		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MIN, mbw_features))
 			mpam_set_feature(mpam_feat_mbw_min, props);
@@ -1911,16 +1925,21 @@ static int mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 	}
 
 	if (mpam_has_feature(mpam_feat_mbw_max, rprops)) {
-		if (mpam_has_feature(mpam_feat_mbw_max, cfg)) {
-			ret = mpam_write_partsel_reg(msc, MBW_MAX, cfg->mbw_max);
-			if (ret)
-				return ret;
-		} else {
-			ret = mpam_write_partsel_reg(msc, MBW_MAX,
-						     MPAMCFG_MBW_MAX_MAX);
-			if (ret)
-				return ret;
-		}
+		u32 val = MPAMCFG_MBW_MAX_MAX;
+
+		if (mpam_has_feature(mpam_feat_mbw_max, cfg))
+			val = cfg->mbw_max;
+
+		/*
+		 * The hard-limit bit follows its own feature bit so that it
+		 * can be set without changing the maximum.
+		 */
+		if (mpam_has_feature(mpam_feat_max_limit, cfg) && cfg->max_limit)
+			val |= MPAMCFG_MBW_MAX_HARDLIM;
+
+		ret = mpam_write_partsel_reg(msc, MBW_MAX, val);
+		if (ret)
+			return ret;
 	}
 
 	if (mpam_has_feature(mpam_feat_mbw_prop, rprops)) {
@@ -2620,6 +2639,37 @@ static bool mpam_has_cmax_wd_feature(struct mpam_props *props)
 	mpam_has_feature((feat), (child))
 
 /*
+ * MPAMF_MBW_IDR.MAX_LIM describes the implemented maximum limits: 0b00 both,
+ * 0b10 the hard limit only, 0b01 the soft limit only. 0b11 is reserved and is
+ * treated as soft-only, so that the hard limit is never claimed when it may
+ * not be implemented.
+ */
+static bool mpam_max_lim_has_hard(u8 max_lim)
+{
+	return max_lim == 0 || max_lim == 2;
+}
+
+static bool mpam_max_lim_has_soft(u8 max_lim)
+{
+	return max_lim == 0 || max_lim == 1;
+}
+
+/*
+ * The hard limit can only be relied on where every resource implements it,
+ * so merge the two descriptions by keeping the limits both of them have.
+ */
+static u8 mpam_max_lim_merge(u8 parent, u8 child)
+{
+	if (!mpam_max_lim_has_hard(parent) || !mpam_max_lim_has_hard(child))
+		return 1;
+
+	if (mpam_max_lim_has_soft(parent) && mpam_max_lim_has_soft(child))
+		return 0;
+
+	return 2;
+}
+
+/*
  * Combine two props fields.
  * If this is for controls that alias the same resource, it is safe to just
  * copy the values over. If two aliasing controls implement the same scheme
@@ -2659,6 +2709,22 @@ static void __props_mismatch(struct mpam_props *parent,
 				     bwa_wd, alias)) {
 		pr_debug("took the min bwa_wd\n");
 		parent->bwa_wd = min(parent->bwa_wd, child->bwa_wd);
+	}
+
+	/*
+	 * The hard limit is only usable if every resource implements it.
+	 * Merge the MAX_LIM descriptions, and clear max_lim when a
+	 * non-aliasing merge drops mpam_feat_mbw_max below.
+	 */
+	if (CAN_MERGE_FEAT(parent, child, mpam_feat_mbw_max, alias)) {
+		parent->max_lim = child->max_lim;
+	} else if (mpam_has_feature(mpam_feat_mbw_max, parent)) {
+		if (mpam_has_feature(mpam_feat_mbw_max, child))
+			parent->max_lim =
+				mpam_max_lim_merge(parent->max_lim,
+						   child->max_lim);
+		else if (!alias)
+			parent->max_lim = 0;
 	}
 
 	if (alias && !mpam_has_cmax_wd_feature(parent) && mpam_has_cmax_wd_feature(child)) {
@@ -3412,6 +3478,7 @@ static bool mpam_update_config(struct mpam_config *cfg,
 	maybe_update_config(cfg, mpam_feat_cpor_part, newcfg, cpbm, has_changes);
 	maybe_update_config(cfg, mpam_feat_mbw_part, newcfg, mbw_pbm, has_changes);
 	maybe_update_config(cfg, mpam_feat_mbw_max, newcfg, mbw_max, has_changes);
+	maybe_update_config(cfg, mpam_feat_max_limit, newcfg, max_limit, has_changes);
 
 	return has_changes;
 }
