@@ -749,11 +749,15 @@ static void update_mba_bw(struct rdtgroup *rgrp, struct rdt_l3_mon_domain *dom_m
 	 * on a system with 10% granularity steps, check whether moving to
 	 * 40% would go past the limit by multiplying current bandwidth by
 	 * "(30 + 10) / 30".
+	 *
+	 * A zero min_bw lets the control reach zero, where the ratio is
+	 * undefined. Take the step up without evaluating it.
 	 */
 	if (cur_msr_val > r_mba->membw.min_bw && user_bw < cur_bw) {
 		new_msr_val = cur_msr_val - r_mba->membw.bw_gran;
-	} else if (cur_msr_val < MAX_MBA_BW &&
-		   (user_bw > (cur_bw * (cur_msr_val + r_mba->membw.min_bw) / cur_msr_val))) {
+	} else if (cur_msr_val < MAX_MBA_BW && user_bw > cur_bw &&
+		   (cur_msr_val == 0 ||
+		    user_bw > (cur_bw * (cur_msr_val + r_mba->membw.min_bw) / cur_msr_val))) {
 		new_msr_val = cur_msr_val + r_mba->membw.bw_gran;
 	} else {
 		return;
