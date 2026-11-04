@@ -1236,6 +1236,7 @@ static int mpam_resctrl_control_init(struct mpam_resctrl_res *res)
 		r->ctrl_scope = RESCTRL_L3_CACHE;
 
 		r->membw.delay_linear = true;
+		r->membw.max_is_soft_limit = (cprops->max_lim == 1);
 		r->membw.throttle_mode = THREAD_THROTTLE_UNDEFINED;
 		r->membw.min_bw = get_mba_min(cprops);
 		r->membw.max_bw = MAX_MBA_BW;
@@ -1481,6 +1482,13 @@ int resctrl_arch_update_one(struct rdt_resource *r, struct rdt_ctrl_domain *d,
 		if (mpam_has_feature(mpam_feat_mbw_max, cprops)) {
 			cfg.mbw_max = percent_to_mbw_max(cfg_val, cprops);
 			mpam_set_feature(mpam_feat_mbw_max, &cfg);
+			/*
+			 * Always carry the hard-limit bit: the control follows
+			 * the software controller, so a hard limit left by an
+			 * earlier mount is cleared by the next write.
+			 */
+			mpam_set_feature(mpam_feat_max_limit, &cfg);
+			cfg.max_limit = r->membw.mba_sc;
 			break;
 		}
 		fallthrough;
