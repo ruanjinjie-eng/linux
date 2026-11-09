@@ -397,20 +397,13 @@ static int resctrl_arch_mon_ctx_alloc_no_wait(enum resctrl_event_id evtid)
 {
 	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[evtid];
 
-	if (!mpam_is_enabled())
+	if (!mpam_is_enabled() || !mon->class)
 		return -EINVAL;
 
-	if (!mon->class)
-		return -EINVAL;
-
-	switch (evtid) {
-	case QOS_L3_OCCUP_EVENT_ID:
+	if (evtid == QOS_L3_OCCUP_EVENT_ID) {
 		/* With CDP, one monitor gets used for both code/data reads */
 		return mpam_alloc_csu_mon(mon->class);
-	case QOS_L3_MBM_LOCAL_EVENT_ID:
-	case QOS_L3_MBM_TOTAL_EVENT_ID:
-		return USE_PRE_ALLOCATED;
-	default:
+	} else {
 		return -EOPNOTSUPP;
 	}
 }
@@ -464,9 +457,15 @@ void resctrl_arch_mon_ctx_free(struct rdt_resource *r,
 	resctrl_arch_mon_ctx_free_no_wait(evtid, mon_idx);
 }
 
-static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
-		      enum mpam_device_features mon_type,
-		      int mon_idx,
+/* The monitor resctrl's counter @cntr_id uses for @cdp_type. */
+static int mon_for_cntr(struct mpam_resctrl_mon *mon, int cntr_id,
+			enum resctrl_conf_type cdp_type)
+{
+	return mon->assigned_counters[resctrl_get_config_index(cntr_id, cdp_type)];
+}
+
+static int __read_mon(struct mpam_component *mon_comp,
+		      enum mpam_device_features mon_type, int mon_idx,
 		      enum resctrl_conf_type cdp_type, u32 closid, u32 rmid, u64 *val)
 {
 	struct mon_cfg cfg;
@@ -476,14 +475,6 @@ static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_c
 
 	/* Shift closid to account for CDP */
 	closid = resctrl_get_config_index(closid, cdp_type);
-
-	if (mon_idx == USE_PRE_ALLOCATED) {
-		int mbwu_idx = resctrl_arch_rmid_idx_encode(closid, rmid);
-
-		mon_idx = mon->mbwu_idx_to_mon[mbwu_idx];
-		if (mon_idx == -1)
-			return -ENOENT;
-	}
 
 	if (irqs_disabled()) {
 		/* Check if we can access this domain without an IPI */
@@ -498,32 +489,6 @@ static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_c
 	};
 
 	return mpam_msmon_read(mon_comp, &cfg, mon_type, val);
-}
-
-static int read_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
-			     enum mpam_device_features mon_type,
-			     int mon_idx, u32 closid, u32 rmid, u64 *val)
-{
-	if (cdp_enabled) {
-		u64 code_val = 0, data_val = 0;
-		int err;
-
-		err = __read_mon(mon, mon_comp, mon_type, mon_idx,
-				 CDP_CODE, closid, rmid, &code_val);
-		if (err)
-			return err;
-
-		err = __read_mon(mon, mon_comp, mon_type, mon_idx,
-				 CDP_DATA, closid, rmid, &data_val);
-		if (err)
-			return err;
-
-		*val = code_val + data_val;
-		return 0;
-	}
-
-	return __read_mon(mon, mon_comp, mon_type, mon_idx,
-			  CDP_NONE, closid, rmid, val);
 }
 
 /* MBWU when not in ABMC mode (not supported), and CSU counters. */
@@ -553,13 +518,31 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 
 	mon_type = mpam_feat_msmon_csu;
 
-	return read_mon_cdp_safe(mon, mon_comp, mon_type, mon_idx,
-				 closid, rmid, val);
+	if (cdp_enabled) {
+		u64 code_val = 0, data_val = 0;
+		int err;
+
+		err = __read_mon(mon_comp, mon_type, mon_idx,
+				 CDP_CODE, closid, rmid, &code_val);
+		if (err)
+			return err;
+
+		err = __read_mon(mon_comp, mon_type, mon_idx,
+				 CDP_DATA, closid, rmid, &data_val);
+		if (err)
+			return err;
+
+		*val = code_val + data_val;
+		return 0;
+	}
+
+	return __read_mon(mon_comp, mon_type, mon_idx,
+			  CDP_NONE, closid, rmid, val);
 }
 
 /* MBWU counters when in ABMC mode */
 int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
-			   u32 closid, u32 rmid, int mon_idx,
+			   u32 closid, u32 rmid, int cntr_id,
 			   enum resctrl_event_id eventid, u64 *val)
 {
 	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[eventid];
@@ -575,43 +558,38 @@ int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
 	mon_comp = l3_dom->mon_comp[eventid];
 
-	return read_mon_cdp_safe(mon, mon_comp, mpam_feat_msmon_mbwu,
-				 USE_PRE_ALLOCATED, closid, rmid, val);
-}
-
-static void __reset_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
-			int mon_idx,
-			enum resctrl_conf_type cdp_type, u32 closid, u32 rmid)
-{
-	struct mon_cfg cfg = { };
-
-	if (!mpam_is_enabled())
-		return;
-
-	/* Shift closid to account for CDP */
-	closid = resctrl_get_config_index(closid, cdp_type);
-
-	if (mon_idx == USE_PRE_ALLOCATED) {
-		int mbwu_idx = resctrl_arch_rmid_idx_encode(closid, rmid);
-
-		mon_idx = mon->mbwu_idx_to_mon[mbwu_idx];
-	}
-
-	if (mon_idx == -1)
-		return;
-	cfg.mon = mon_idx;
-	mpam_msmon_reset_mbwu(mon_comp, &cfg);
-}
-
-static void reset_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
-			       int mon_idx, u32 closid, u32 rmid)
-{
 	if (cdp_enabled) {
-		__reset_mon(mon, mon_comp, mon_idx, CDP_CODE, closid, rmid);
-		__reset_mon(mon, mon_comp, mon_idx, CDP_DATA, closid, rmid);
-	} else {
-		__reset_mon(mon, mon_comp, mon_idx, CDP_NONE, closid, rmid);
+		u64 code_val = 0, data_val = 0;
+		int err;
+
+		err = __read_mon(mon_comp, mpam_feat_msmon_mbwu,
+				 mon_for_cntr(mon, cntr_id, CDP_CODE),
+				 CDP_CODE, closid, rmid, &code_val);
+		if (err)
+			return err;
+
+		err = __read_mon(mon_comp, mpam_feat_msmon_mbwu,
+				 mon_for_cntr(mon, cntr_id, CDP_DATA),
+				 CDP_DATA, closid, rmid, &data_val);
+		if (err)
+			return err;
+
+		*val = code_val + data_val;
+		return 0;
 	}
+
+	return __read_mon(mon_comp, mpam_feat_msmon_mbwu,
+			  mon_for_cntr(mon, cntr_id, CDP_NONE),
+			  CDP_NONE, closid, rmid, val);
+}
+
+/* Reset the monitor resctrl's counter @cntr_id uses for @cdp_type. */
+static void __reset_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
+			int cntr_id, enum resctrl_conf_type cdp_type)
+{
+	struct mon_cfg cfg = { .mon = mon_for_cntr(mon, cntr_id, cdp_type) };
+
+	mpam_msmon_reset_mbwu(mon_comp, &cfg);
 }
 
 /* Reset an assigned counter */
@@ -632,7 +610,12 @@ void resctrl_arch_reset_cntr(struct rdt_resource *r, struct rdt_l3_mon_domain *d
 	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
 	mon_comp = l3_dom->mon_comp[eventid];
 
-	reset_mon_cdp_safe(mon, mon_comp, USE_PRE_ALLOCATED, closid, rmid);
+	if (cdp_enabled) {
+		__reset_mon(mon, mon_comp, cntr_id, CDP_CODE);
+		__reset_mon(mon, mon_comp, cntr_id, CDP_DATA);
+	} else {
+		__reset_mon(mon, mon_comp, cntr_id, CDP_NONE);
+	}
 }
 
 /*
@@ -1170,22 +1153,6 @@ static void mpam_resctrl_pick_counters(void)
 	}
 }
 
-static void __config_cntr(struct mpam_resctrl_mon *mon, u32 cntr_id,
-			  enum resctrl_conf_type cdp_type, u32 closid, u32 rmid,
-			  bool assign)
-{
-	/* Same CDP index remap as closid; maps cntr_id to assigned_counters[]. */
-	u32 mbwu_idx, mon_idx = resctrl_get_config_index(cntr_id, cdp_type);
-
-	closid = resctrl_get_config_index(closid, cdp_type);
-	mbwu_idx = resctrl_arch_rmid_idx_encode(closid, rmid);
-
-	if (assign)
-		mon->mbwu_idx_to_mon[mbwu_idx] = mon->assigned_counters[mon_idx];
-	else
-		mon->mbwu_idx_to_mon[mbwu_idx] = -1;
-}
-
 void resctrl_arch_config_cntr(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 			      enum resctrl_event_id evtid, u32 rmid, u32 closid,
 			      u32 cntr_id, bool assign)
@@ -1197,19 +1164,13 @@ void resctrl_arch_config_cntr(struct rdt_resource *r, struct rdt_l3_mon_domain *
 		return;
 	}
 
-	if (!mon->mbwu_idx_to_mon || !mon->assigned_counters) {
-		pr_debug("monitor arrays not allocated\n");
+	if (!mon->assigned_counters) {
+		pr_debug("monitor array not allocated\n");
 		return;
 	}
 
-	if (cdp_enabled) {
-		__config_cntr(mon, cntr_id, CDP_CODE, closid, rmid, assign);
-		__config_cntr(mon, cntr_id, CDP_DATA, closid, rmid, assign);
-	} else {
-		__config_cntr(mon, cntr_id, CDP_NONE, closid, rmid, assign);
-	}
-
-	resctrl_arch_reset_cntr(r, d, closid, rmid, cntr_id, QOS_L3_MBM_TOTAL_EVENT_ID);
+	if (assign)
+		resctrl_arch_reset_cntr(r, d, closid, rmid, cntr_id, evtid);
 }
 
 static int mpam_resctrl_control_init(struct mpam_resctrl_res *res)
@@ -1296,25 +1257,16 @@ static int mpam_resctrl_pick_domain_id(int cpu, struct mpam_component *comp)
 static int mpam_resctrl_monitor_init_abmc(struct mpam_resctrl_mon *mon)
 {
 	struct mpam_resctrl_res *res = &mpam_resctrl_controls[RDT_RESOURCE_L3];
-	size_t num_rmid = resctrl_arch_system_num_rmid_idx();
 	struct rdt_resource *l3 = &res->resctrl_res;
 	struct mpam_class *class = mon->class;
 	u16 num_mbwu_mon;
 	int *cntrs;
-
-	int *rmid_array __free(kvfree) = kvmalloc_objs(*rmid_array, num_rmid);
-	if (!rmid_array) {
-		pr_debug("Failed to allocate RMID array\n");
-		return -ENOMEM;
-	}
-	memset(rmid_array, -1, num_rmid * sizeof(*rmid_array));
 
 	num_mbwu_mon = class->props.num_mbwu_mon;
 	cntrs = __alloc_mbwu_array(mon->class, num_mbwu_mon);
 	if (IS_ERR(cntrs))
 		return PTR_ERR(cntrs);
 	mon->assigned_counters = cntrs;
-	mon->mbwu_idx_to_mon = no_free_ptr(rmid_array);
 
 	l3->mon.mbm_cntr_assignable = true;
 	l3->mon.mbm_assign_on_mkdir = true;
@@ -1943,17 +1895,12 @@ static void mpam_resctrl_teardown_mon(struct mpam_resctrl_mon *mon, struct mpam_
 {
 	u32 num_mbwu_mon = class->props.num_mbwu_mon;
 
-	if (!mon->mbwu_idx_to_mon)
+	if (!mon->assigned_counters)
 		return;
 
-	if (mon->assigned_counters) {
-		__free_mbwu_mon(class, mon->assigned_counters, num_mbwu_mon);
-		kvfree(mon->assigned_counters);
-		mon->assigned_counters = NULL;
-	}
-
-	kvfree(mon->mbwu_idx_to_mon);
-	mon->mbwu_idx_to_mon = NULL;
+	__free_mbwu_mon(class, mon->assigned_counters, num_mbwu_mon);
+	kvfree(mon->assigned_counters);
+	mon->assigned_counters = NULL;
 }
 
 void mpam_resctrl_teardown_class(struct mpam_class *class)
