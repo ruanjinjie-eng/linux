@@ -213,6 +213,10 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
 	if (enable && mpam_partid_max < 1)
 		return -EINVAL;
 
+	if (enable && (!mpam_resctrl_controls[rid].resctrl_res.alloc_capable ||
+		       !mpam_resctrl_controls[rid].resctrl_res.cdp_capable))
+		return -EINVAL;
+
 	/*
 	 * resctrl_arch_set_cdp_enabled() is only called with enable set to
 	 * false on error and unmount.
