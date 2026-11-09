@@ -30,14 +30,6 @@ struct platform_device;
 #define PACKED_FOR_KUNIT
 #endif
 
-/*
- * This 'mon' values must not alias an actual monitor, so must be larger than
- * U16_MAX, but not be confused with an errno value, so smaller than
- * (u32)-SZ_4K.
- * USE_PRE_ALLOCATED is used to avoid confusion with an actual monitor.
- */
-#define USE_PRE_ALLOCATED	(U16_MAX + 1)
-
 static inline bool mpam_is_enabled(void)
 {
 	return static_branch_likely(&mpam_enabled);
@@ -309,10 +301,6 @@ enum mon_filter_options {
 };
 
 struct mon_cfg {
-	/*
-	 * mon must be large enough to hold out of range values like
-	 * USE_PRE_ALLOCATED
-	 */
 	u32			mon;
 	u8			pmg;
 	bool			match_pmg;
@@ -454,9 +442,6 @@ struct mpam_resctrl_res {
 
 struct mpam_resctrl_mon {
 	struct mpam_class	*class;
-
-	/* Array of allocated MBWU monitors, indexed by (closid, rmid). */
-	int			*mbwu_idx_to_mon;
 
 	/* Array of assigned MBWU monitors, indexed by resctrl's cntr_id. */
 	int			*assigned_counters;
