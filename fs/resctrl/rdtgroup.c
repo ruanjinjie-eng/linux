@@ -1200,6 +1200,21 @@ static int rdt_num_rmids_show(struct kernfs_open_file *of,
 	return 0;
 }
 
+static int rdt_moveable_mon_group_show(struct kernfs_open_file *of,
+				       struct seq_file *seq, void *v)
+{
+	/*
+	 * Moving a MON group to another CTRL_MON group keeps its RMID but
+	 * changes its CLOSID. Where the RMID index depends on the CLOSID,
+	 * the RMID index changes with the CLOSID and the move is rejected.
+	 */
+	bool fixed = IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID);
+
+	seq_printf(seq, "%u\n", !fixed);
+
+	return 0;
+}
+
 static int rdt_mon_features_show(struct kernfs_open_file *of,
 				 struct seq_file *seq, void *v)
 {
@@ -1975,6 +1990,16 @@ static struct rftype res_common_files[] = {
 		.seq_show	= rdt_last_cmd_status_show,
 		.fflags		= RFTYPE_TOP_INFO,
 	},
+	/*
+	 * MON groups only exist when monitoring is supported. Defer
+	 * "fflags" initialization to platform discovery.
+	 */
+	{
+		.name		= "moveable_mon_group",
+		.mode		= 0444,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= rdt_moveable_mon_group_show,
+	},
 	{
 		.name		= "mbm_assign_on_mkdir",
 		.mode		= 0644,
@@ -2278,6 +2303,13 @@ static void thread_throttle_mode_init(void)
 
 	resctrl_file_fflags_init("thread_throttle_mode",
 				 RFTYPE_CTRL_INFO | RFTYPE_RES_MB);
+}
+
+static void moveable_mon_group_init(void)
+{
+	/* MON groups cannot be created when monitoring is not supported. */
+	if (resctrl_arch_mon_capable())
+		resctrl_file_fflags_init("moveable_mon_group", RFTYPE_TOP_INFO);
 }
 
 /*
@@ -4828,6 +4860,8 @@ int resctrl_init(void)
 	rdtgroup_setup_default();
 
 	thread_throttle_mode_init();
+
+	moveable_mon_group_init();
 
 	io_alloc_init();
 
