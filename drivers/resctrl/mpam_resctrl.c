@@ -463,6 +463,15 @@ void resctrl_arch_mon_ctx_free(struct rdt_resource *r,
 	resctrl_arch_mon_ctx_free_no_wait(evtid, mon_idx);
 }
 
+/* The monitor resctrl's counter @cntr_id uses for @cdp_type. */
+static int mon_for_cntr(struct mpam_resctrl_mon *mon, int cntr_id,
+			enum resctrl_conf_type cdp_type)
+{
+	u32 idx = resctrl_get_config_index(cntr_id, cdp_type);
+
+	return mon->assigned_counters[idx];
+}
+
 static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
 		      enum mpam_device_features mon_type,
 		      int mon_idx,
@@ -558,7 +567,7 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 
 /* MBWU counters when in ABMC mode */
 int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
-			   u32 closid, u32 rmid, int mon_idx,
+			   u32 closid, u32 rmid, int cntr_id,
 			   enum resctrl_event_id eventid, u64 *val)
 {
 	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[eventid];
@@ -574,8 +583,30 @@ int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
 	mon_comp = l3_dom->mon_comp[eventid];
 
-	return read_mon_cdp_safe(mon, mon_comp, mpam_feat_msmon_mbwu,
-				 USE_PRE_ALLOCATED, closid, rmid, val);
+	/* A counter ID maps to one monitor per CDP configuration. */
+	if (cdp_enabled) {
+		u64 code_val = 0, data_val = 0;
+		int err;
+
+		err = __read_mon(mon, mon_comp, mpam_feat_msmon_mbwu,
+				 mon_for_cntr(mon, cntr_id, CDP_CODE),
+				 CDP_CODE, closid, rmid, &code_val);
+		if (err)
+			return err;
+
+		err = __read_mon(mon, mon_comp, mpam_feat_msmon_mbwu,
+				 mon_for_cntr(mon, cntr_id, CDP_DATA),
+				 CDP_DATA, closid, rmid, &data_val);
+		if (err)
+			return err;
+
+		*val = code_val + data_val;
+		return 0;
+	}
+
+	return __read_mon(mon, mon_comp, mpam_feat_msmon_mbwu,
+			  mon_for_cntr(mon, cntr_id, CDP_NONE),
+			  CDP_NONE, closid, rmid, val);
 }
 
 static void __reset_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
@@ -603,13 +634,16 @@ static void __reset_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon
 }
 
 static void reset_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
-			       int mon_idx, u32 closid, u32 rmid)
+			       int cntr_id, u32 closid, u32 rmid)
 {
 	if (cdp_enabled) {
-		__reset_mon(mon, mon_comp, mon_idx, CDP_CODE, closid, rmid);
-		__reset_mon(mon, mon_comp, mon_idx, CDP_DATA, closid, rmid);
+		__reset_mon(mon, mon_comp, mon_for_cntr(mon, cntr_id, CDP_CODE),
+			    CDP_CODE, closid, rmid);
+		__reset_mon(mon, mon_comp, mon_for_cntr(mon, cntr_id, CDP_DATA),
+			    CDP_DATA, closid, rmid);
 	} else {
-		__reset_mon(mon, mon_comp, mon_idx, CDP_NONE, closid, rmid);
+		__reset_mon(mon, mon_comp, mon_for_cntr(mon, cntr_id, CDP_NONE),
+			    CDP_NONE, closid, rmid);
 	}
 }
 
@@ -631,7 +665,7 @@ void resctrl_arch_reset_cntr(struct rdt_resource *r, struct rdt_l3_mon_domain *d
 	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
 	mon_comp = l3_dom->mon_comp[eventid];
 
-	reset_mon_cdp_safe(mon, mon_comp, USE_PRE_ALLOCATED, closid, rmid);
+	reset_mon_cdp_safe(mon, mon_comp, cntr_id, closid, rmid);
 }
 
 /*
