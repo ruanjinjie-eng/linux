@@ -463,6 +463,14 @@ void resctrl_arch_mon_ctx_free(struct rdt_resource *r,
 	resctrl_arch_mon_ctx_free_no_wait(evtid, mon_idx);
 }
 
+static int mon_idx_from_cntr_id(struct mpam_resctrl_mon *mon, int cntr_id,
+			enum resctrl_conf_type cdp_type)
+{
+	u32 idx = resctrl_get_config_index(cntr_id, cdp_type);
+
+	return mon->assigned_counters[idx];
+}
+
 static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
 		      enum mpam_device_features mon_type,
 		      int mon_idx,
@@ -500,19 +508,25 @@ static int __read_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_c
 }
 
 static int read_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
-			     enum mpam_device_features mon_type,
+			     enum mpam_device_features mon_type, bool is_cntr,
 			     int mon_idx, u32 closid, u32 rmid, u64 *val)
 {
 	if (cdp_enabled) {
+		int code_idx = mon_idx, data_idx = mon_idx;
 		u64 code_val = 0, data_val = 0;
 		int err;
 
-		err = __read_mon(mon, mon_comp, mon_type, mon_idx,
+		if (is_cntr) {
+			code_idx = mon_idx_from_cntr_id(mon, mon_idx, CDP_CODE);
+			data_idx = mon_idx_from_cntr_id(mon, mon_idx, CDP_DATA);
+		}
+
+		err = __read_mon(mon, mon_comp, mon_type, code_idx,
 				 CDP_CODE, closid, rmid, &code_val);
 		if (err)
 			return err;
 
-		err = __read_mon(mon, mon_comp, mon_type, mon_idx,
+		err = __read_mon(mon, mon_comp, mon_type, data_idx,
 				 CDP_DATA, closid, rmid, &data_val);
 		if (err)
 			return err;
@@ -520,6 +534,9 @@ static int read_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_component
 		*val = code_val + data_val;
 		return 0;
 	}
+
+	if (is_cntr)
+		mon_idx = mon_idx_from_cntr_id(mon, mon_idx, CDP_NONE);
 
 	return __read_mon(mon, mon_comp, mon_type, mon_idx,
 			  CDP_NONE, closid, rmid, val);
@@ -552,13 +569,13 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 
 	mon_type = mpam_feat_msmon_csu;
 
-	return read_mon_cdp_safe(mon, mon_comp, mon_type, mon_idx,
+	return read_mon_cdp_safe(mon, mon_comp, mon_type, false, mon_idx,
 				 closid, rmid, val);
 }
 
 /* MBWU counters when in ABMC mode */
 int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
-			   u32 closid, u32 rmid, int mon_idx,
+			   u32 closid, u32 rmid, int cntr_id,
 			   enum resctrl_event_id eventid, u64 *val)
 {
 	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[eventid];
@@ -574,8 +591,8 @@ int resctrl_arch_cntr_read(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
 	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
 	mon_comp = l3_dom->mon_comp[eventid];
 
-	return read_mon_cdp_safe(mon, mon_comp, mpam_feat_msmon_mbwu,
-				 USE_PRE_ALLOCATED, closid, rmid, val);
+	return read_mon_cdp_safe(mon, mon_comp, mpam_feat_msmon_mbwu, true,
+				 cntr_id, closid, rmid, val);
 }
 
 static void __reset_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
@@ -603,12 +620,22 @@ static void __reset_mon(struct mpam_resctrl_mon *mon, struct mpam_component *mon
 }
 
 static void reset_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_component *mon_comp,
-			       int mon_idx, u32 closid, u32 rmid)
+			       bool is_cntr, int mon_idx, u32 closid, u32 rmid)
 {
 	if (cdp_enabled) {
-		__reset_mon(mon, mon_comp, mon_idx, CDP_CODE, closid, rmid);
-		__reset_mon(mon, mon_comp, mon_idx, CDP_DATA, closid, rmid);
+		int code_idx = mon_idx, data_idx = mon_idx;
+
+		if (is_cntr) {
+			code_idx = mon_idx_from_cntr_id(mon, mon_idx, CDP_CODE);
+			data_idx = mon_idx_from_cntr_id(mon, mon_idx, CDP_DATA);
+		}
+
+		__reset_mon(mon, mon_comp, code_idx, CDP_CODE, closid, rmid);
+		__reset_mon(mon, mon_comp, data_idx, CDP_DATA, closid, rmid);
 	} else {
+		if (is_cntr)
+			mon_idx = mon_idx_from_cntr_id(mon, mon_idx, CDP_NONE);
+
 		__reset_mon(mon, mon_comp, mon_idx, CDP_NONE, closid, rmid);
 	}
 }
@@ -631,7 +658,7 @@ void resctrl_arch_reset_cntr(struct rdt_resource *r, struct rdt_l3_mon_domain *d
 	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
 	mon_comp = l3_dom->mon_comp[eventid];
 
-	reset_mon_cdp_safe(mon, mon_comp, USE_PRE_ALLOCATED, closid, rmid);
+	reset_mon_cdp_safe(mon, mon_comp, true, cntr_id, closid, rmid);
 }
 
 /*
