@@ -71,6 +71,13 @@ static u32 *closid_num_dirty_rmid;
 static unsigned int rmid_limbo_count;
 
 /*
+ * @limbo_cdp_enabled - True if the RMIDs in limbo were placed there while CDP
+ *     was enabled. Only used when CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID is
+ *     defined.
+ */
+static bool limbo_cdp_enabled;
+
+/*
  * @rmid_entry - The entry in the limbo and free lists.
  */
 static struct rmid_entry	*rmid_ptrs;
@@ -1044,18 +1051,36 @@ int setup_rmid_lru_list(void)
  * cqm_resume_limbo_handler() - Restart the limbo handler after a mount.
  *
  * The limbo handler stops while resctrl is unmounted. Restart it on every
- * domain that still has RMIDs in limbo.
+ * domain that still has RMIDs in limbo. Where the RMID depends on the CLOSID
+ * and the mount changed the CDP state, the RMIDs in limbo can no longer be
+ * read: release them instead.
  */
 void cqm_resume_limbo_handler(void)
 {
 	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
 	struct rdt_l3_mon_domain *d;
+	bool release = false;
 
 	lockdep_assert_cpus_held();
 	lockdep_assert_held(&rdtgroup_mutex);
 
 	if (!r->mon_capable || !resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID))
 		return;
+
+	/*
+	 * Where the RMID depends on the CLOSID, the RMIDs in limbo can only
+	 * be read with the CDP state they were freed under. Check L2 as
+	 * well: on MPAM, CDP enabled on any resource changes how every
+	 * CLOSID is monitored, so CDP on L2 alone also changes how the L3
+	 * monitors are read.
+	 */
+	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID)) {
+		bool cdp_enabled = resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L2) ||
+				   resctrl_arch_get_cdp_enabled(RDT_RESOURCE_L3);
+
+		release = cdp_enabled != limbo_cdp_enabled;
+		limbo_cdp_enabled = cdp_enabled;
+	}
 
 	list_for_each_entry_rcu(d, &r->mon_domains, hdr.list,
 				lockdep_is_cpus_held()) {
@@ -1067,7 +1092,10 @@ void cqm_resume_limbo_handler(void)
 		 * it is queued again on a CPU picked now.
 		 */
 		cancel_delayed_work(&d->cqm_limbo);
-		cqm_setup_limbo_handler(d, 0, RESCTRL_PICK_ANY_CPU);
+		if (release)
+			release_limbo_rmids(d);
+		else
+			cqm_setup_limbo_handler(d, 0, RESCTRL_PICK_ANY_CPU);
 	}
 }
 
