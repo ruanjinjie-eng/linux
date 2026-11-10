@@ -401,6 +401,8 @@ bool is_mba_sc(struct rdt_resource *r);
 void cqm_setup_limbo_handler(struct rdt_l3_mon_domain *dom, unsigned long delay_ms,
 			     int exclude_cpu);
 
+void cqm_resume_limbo_handler(void);
+
 void cqm_handle_limbo(struct work_struct *work);
 
 bool has_busy_rmid(struct rdt_l3_mon_domain *d);
