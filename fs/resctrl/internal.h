@@ -403,6 +403,8 @@ void cqm_setup_limbo_handler(struct rdt_l3_mon_domain *dom, unsigned long delay_
 
 void cqm_handle_limbo(struct work_struct *work);
 
+void cqm_resume_limbo_handler(void);
+
 bool has_busy_rmid(struct rdt_l3_mon_domain *d);
 
 void release_limbo_rmids(struct rdt_l3_mon_domain *d);
