@@ -71,6 +71,13 @@ static u32 *closid_num_dirty_rmid;
 static unsigned int rmid_limbo_count;
 
 /*
+ * @limbo_cdp_state - 1 if the RMIDs were last checked with CDP enabled, 0 if
+ *     not, -1 before the first mount, when only the default RMID has been
+ *     used. Only used when CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID is defined.
+ */
+static int limbo_cdp_state = -1;
+
+/*
  * @rmid_entry - The entry in the limbo and free lists.
  */
 static struct rmid_entry	*rmid_ptrs;
@@ -1040,11 +1047,44 @@ int setup_rmid_lru_list(void)
 	return 0;
 }
 
+/*
+ * A change of the CDP state changes how every RMID is read, so any RMID, free
+ * or in limbo, may now count cache lines left by another. Put every RMID that
+ * can be allocated back in limbo. The others can neither be read nor
+ * allocated until the CDP state changes back. Without a resource that can
+ * allocate, only the default CLOSID is used.
+ */
+static void recreate_dirty_rmids(struct rdt_resource *r)
+{
+	u32 idx_limit = resctrl_arch_system_num_rmid_idx();
+	u32 num_closid = max(closids_supported(), 1);
+	struct rdt_l3_mon_domain *d;
+
+	lockdep_assert_cpus_held();
+	lockdep_assert_held(&rdtgroup_mutex);
+
+	/* Only the default group exists, so this frees every other RMID. */
+	list_for_each_entry_rcu(d, &r->mon_domains, hdr.list, lockdep_is_cpus_held())
+		release_limbo_rmids(d);
+
+	/* Skip the default RMID, which stays allocated. */
+	for (u32 idx = 1; idx < idx_limit; idx++) {
+		struct rmid_entry *entry = __rmid_entry(idx);
+
+		if (entry->closid >= num_closid)
+			continue;
+
+		list_del(&entry->list);
+		add_rmid_to_limbo(entry);
+	}
+}
+
 /**
  * cqm_resume_limbo_handler() - Restart the limbo handler after a mount.
  *
  * The limbo handler stops while resctrl is unmounted. Restart it on every
- * domain that still has RMIDs in limbo.
+ * domain that still has RMIDs in limbo, after checking every RMID again if
+ * the mount changed how they are read.
  */
 void cqm_resume_limbo_handler(void)
 {
@@ -1056,6 +1096,23 @@ void cqm_resume_limbo_handler(void)
 
 	if (!r->mon_capable || !resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID))
 		return;
+
+	/*
+	 * Where the RMID depends on the CLOSID, the CDP state decides how an
+	 * RMID is read. CDP on any resource changes how every CLOSID is
+	 * monitored, including by the L3.
+	 */
+	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID)) {
+		struct rdt_resource *res;
+		bool cdp_enabled = false;
+
+		for_each_rdt_resource(res)
+			cdp_enabled |= resctrl_arch_get_cdp_enabled(res->rid);
+
+		if (limbo_cdp_state >= 0 && cdp_enabled != limbo_cdp_state)
+			recreate_dirty_rmids(r);
+		limbo_cdp_state = cdp_enabled;
+	}
 
 	list_for_each_entry_rcu(d, &r->mon_domains, hdr.list, lockdep_is_cpus_held()) {
 		if (!has_busy_rmid(d))

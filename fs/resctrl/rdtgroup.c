@@ -181,6 +181,7 @@ static void closid_exit(void)
 {
 	bitmap_free(closid_free_map);
 	closid_free_map = NULL;
+	closid_free_map_len = 0;
 }
 
 static int closid_alloc(void)
