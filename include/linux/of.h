@@ -480,10 +480,14 @@ int of_map_msi_id(const struct device_node *np, u32 id,
 phys_addr_t of_dma_get_max_cpu_address(struct device_node *np);
 
 struct kimage;
+struct kexec_buf;
 void *of_kexec_alloc_and_setup_fdt(const struct kimage *image,
 				   unsigned long initrd_load_addr,
 				   unsigned long initrd_len,
 				   const char *cmdline, size_t extra_fdt_size);
+int of_kexec_add_fdt(struct kimage *image, struct kexec_buf *kbuf,
+		     unsigned long initrd_load_addr, const char *cmdline,
+		     void **fdt);
 #else /* CONFIG_OF */
 
 static inline void of_core_init(void)
