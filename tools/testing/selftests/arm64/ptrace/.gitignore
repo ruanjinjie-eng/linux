@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-only
+single_step_signal_handler
+single_step_spsr_ss
+single_step_syscall_stop
+sysemu_singlestep
+rseq_syscall_pc
