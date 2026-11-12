@@ -2640,15 +2640,19 @@ static int set_mba_sc(bool mba_sc)
 {
 	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_MBA);
 	struct rdt_resource *rmbm = resctrl_arch_get_resource(RDT_RESOURCE_L3);
-	u32 num_closid = resctrl_arch_get_num_closid(r);
 	struct rdt_ctrl_domain *d;
 	unsigned long fflags;
-	int i;
 
 	if (!supports_mba_mbps() || mba_sc == is_mba_sc(r))
 		return -EINVAL;
 
 	r->membw.mba_sc = mba_sc;
+
+	/*
+	 * The architecture may cap the groups to what the controller can
+	 * measure. Do it before the number of CLOSIDs is used below.
+	 */
+	resctrl_arch_set_mba_sc(mba_sc);
 
 	/*
 	 * The controller needs its event counted in every monitoring group:
@@ -2666,9 +2670,20 @@ static int set_mba_sc(bool mba_sc)
 
 	rdtgroup_default.mba_mbps_event = mba_mbps_default_event;
 
-	list_for_each_entry_rcu(d, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
-		for (i = 0; i < num_closid; i++)
-			d->mbps_val[i] = MBA_MAX_MBPS;
+	/*
+	 * Reset the targets of the CLOSIDs the controller uses. Skip this
+	 * when disabling: nothing reads the targets while the controller is
+	 * off, and a domain that came online while it was enabled may have
+	 * allocated mbps_val for the capped, smaller number of CLOSIDs.
+	 */
+	if (mba_sc) {
+		u32 num_closid = resctrl_arch_get_num_closid(r);
+		int i;
+
+		list_for_each_entry_rcu(d, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
+			for (i = 0; i < num_closid; i++)
+				d->mbps_val[i] = MBA_MAX_MBPS;
+		}
 	}
 
 	fflags = mba_sc ? RFTYPE_CTRL_BASE | RFTYPE_MON_BASE : 0;

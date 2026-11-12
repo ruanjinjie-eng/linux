@@ -216,12 +216,14 @@ static struct rmid_entry *resctrl_find_free_rmid(u32 closid)
 		 * to be if it were used with this CLOSID.
 		 * If the CLOSID is irrelevant on this architecture, the two
 		 * index values are always the same on every entry and thus the
-		 * very first entry will be returned.
+		 * very first entry will be returned. Skip the RMIDs the
+		 * architecture does not allow.
 		 */
 		itr_idx = resctrl_arch_rmid_idx_encode(itr->closid, itr->rmid);
 		cmp_idx = resctrl_arch_rmid_idx_encode(closid, itr->rmid);
 
-		if (itr_idx == cmp_idx)
+		if (itr_idx == cmp_idx &&
+		    resctrl_arch_rmid_valid(closid, itr->rmid))
 			return itr;
 	}
 
