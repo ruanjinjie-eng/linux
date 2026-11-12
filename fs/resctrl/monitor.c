@@ -662,6 +662,38 @@ static struct rdt_ctrl_domain *get_sc_ctrl_domain_from_cpu(int cpu,
 }
 
 /*
+ * Pick the control value for the next interval: step down while the
+ * measured bandwidth is above the target, and step up when the target is
+ * above the bandwidth the next step up is expected to yield.
+ *
+ * Always increase throttling if current bandwidth is above the target set
+ * by user. But avoid thrashing up and down on every poll by checking
+ * whether a decrease in throttling is likely to push the group back over
+ * target. E.g. if currently throttling to 30% of bandwidth on a system
+ * with 10% granularity steps, check whether moving to 40% would go past
+ * the limit by multiplying current bandwidth by "(30 + 10) / 30".
+ *
+ * Return: true when the control value changes, false otherwise.
+ */
+static bool mba_sc_next_ctrl_val(struct rdt_resource *r_mba, u32 cur_msr_val,
+				 u32 cur_bw, u32 user_bw, u32 *new_msr_val)
+{
+	if (cur_msr_val > r_mba->membw.min_bw && user_bw < cur_bw) {
+		*new_msr_val = cur_msr_val - r_mba->membw.bw_gran;
+		return true;
+	}
+
+	if (cur_msr_val < MAX_MBA_BW &&
+	    user_bw > (cur_bw * (cur_msr_val + r_mba->membw.min_bw) /
+		       cur_msr_val)) {
+		*new_msr_val = cur_msr_val + r_mba->membw.bw_gran;
+		return true;
+	}
+
+	return false;
+}
+
+/*
  * Feedback loop for MBA software controller (mba_sc)
  *
  * mba_sc is a feedback loop where we periodically read MBM counters and
@@ -737,27 +769,9 @@ static void update_mba_bw(struct rdtgroup *rgrp, struct rdt_l3_mon_domain *dom_m
 		cur_bw += cmbm_data->prev_bw;
 	}
 
-	/*
-	 * Scale up/down the bandwidth linearly for the ctrl group.  The
-	 * bandwidth step is the bandwidth granularity specified by the
-	 * hardware.
-	 * Always increase throttling if current bandwidth is above the
-	 * target set by user.
-	 * But avoid thrashing up and down on every poll by checking
-	 * whether a decrease in throttling is likely to push the group
-	 * back over target. E.g. if currently throttling to 30% of bandwidth
-	 * on a system with 10% granularity steps, check whether moving to
-	 * 40% would go past the limit by multiplying current bandwidth by
-	 * "(30 + 10) / 30".
-	 */
-	if (cur_msr_val > r_mba->membw.min_bw && user_bw < cur_bw) {
-		new_msr_val = cur_msr_val - r_mba->membw.bw_gran;
-	} else if (cur_msr_val < MAX_MBA_BW &&
-		   (user_bw > (cur_bw * (cur_msr_val + r_mba->membw.min_bw) / cur_msr_val))) {
-		new_msr_val = cur_msr_val + r_mba->membw.bw_gran;
-	} else {
+	if (!mba_sc_next_ctrl_val(r_mba, cur_msr_val, cur_bw, user_bw,
+				  &new_msr_val))
 		return;
-	}
 
 	resctrl_arch_update_one(r_mba, dom_mba, closid, CDP_NONE, new_msr_val);
 }
