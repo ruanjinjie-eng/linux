@@ -63,6 +63,14 @@ static DEFINE_MUTEX(domain_list_lock);
 static bool cdp_enabled;
 
 /*
+ * The CLOSIDs and the RMIDs per CLOSID resctrl may use while the MBA software
+ * controller is enabled. Set by resctrl_arch_set_mba_sc().
+ */
+static u32 mpam_capped_num_closid;
+static u32 mpam_capped_num_rmid;
+static bool mba_sc_enabled;
+
+/*
  * We use cacheinfo to discover the size of the caches and their id. cacheinfo
  * populates this from a device_initcall(). mpam_resctrl_setup() must wait.
  */
@@ -114,13 +122,16 @@ void resctrl_arch_reset_rmid_all(struct rdt_resource *r, struct rdt_l3_mon_domai
 {
 }
 
-void resctrl_arch_reset_rmid(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
-			     u32 closid, u32 rmid, enum resctrl_event_id eventid)
-{
-}
-
 bool resctrl_arch_mbm_cntr_assign_enabled(struct rdt_resource *r)
 {
+	/*
+	 * While the MBA software controller is enabled the driver assigns
+	 * the counters itself, one for every monitor group: resctrl uses the
+	 * default assignment mode.
+	 */
+	if (mba_sc_enabled)
+		return false;
+
 	return (r == &mpam_resctrl_controls[RDT_RESOURCE_L3].resctrl_res);
 }
 
@@ -271,7 +282,7 @@ static bool mpam_resctrl_hide_cdp(enum resctrl_res_level rid)
  */
 u32 resctrl_arch_get_num_closid(struct rdt_resource *ignored)
 {
-	return mpam_partid_max + 1;
+	return mba_sc_enabled ? mpam_capped_num_closid : mpam_partid_max + 1;
 }
 
 u32 resctrl_arch_system_num_rmid_idx(void)
@@ -288,6 +299,12 @@ void resctrl_arch_rmid_idx_decode(u32 idx, u32 *closid, u32 *rmid)
 {
 	*closid = idx / (mpam_pmg_max + 1);
 	*rmid = idx % (mpam_pmg_max + 1);
+}
+
+/* The CLOSID is already capped by resctrl_arch_get_num_closid(). */
+bool resctrl_arch_rmid_valid(u32 closid, u32 rmid)
+{
+	return !mba_sc_enabled || rmid < mpam_capped_num_rmid;
 }
 
 void resctrl_arch_sched_in(struct task_struct *tsk)
@@ -510,7 +527,11 @@ static int read_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_component
 			  CDP_NONE, closid, rmid, val);
 }
 
-/* MBWU when not in ABMC mode (not supported), and CSU counters. */
+/*
+ * CSU counters, and MBWU counters when the MBA software controller is
+ * enabled: the MBWU monitor of the group was chosen when the controller was
+ * enabled, see mpam_resctrl_map_mbwu_mons().
+ */
 int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 			   u32 closid, u32 rmid, enum resctrl_event_id eventid,
 			   void *arch_priv, u64 *val, void *arch_mon_ctx)
@@ -532,10 +553,10 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 	l3_dom = container_of(hdr, struct mpam_resctrl_dom, resctrl_mon_dom.hdr);
 	mon_comp = l3_dom->mon_comp[eventid];
 
-	if (eventid != QOS_L3_OCCUP_EVENT_ID)
-		return -EINVAL;
-
-	mon_type = mpam_feat_msmon_csu;
+	if (eventid == QOS_L3_OCCUP_EVENT_ID)
+		mon_type = mpam_feat_msmon_csu;
+	else
+		mon_type = mpam_feat_msmon_mbwu;
 
 	return read_mon_cdp_safe(mon, mon_comp, mon_type, mon_idx,
 				 closid, rmid, val);
@@ -596,6 +617,26 @@ static void reset_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_compone
 	} else {
 		__reset_mon(mon, mon_comp, mon_idx, CDP_NONE, closid, rmid);
 	}
+}
+
+/* Reset the MBWU counter of a group when the default assignment mode is used */
+void resctrl_arch_reset_rmid(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
+			     u32 closid, u32 rmid, enum resctrl_event_id eventid)
+{
+	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[eventid];
+	struct mpam_resctrl_dom *l3_dom;
+	struct mpam_component *mon_comp;
+
+	if (!mpam_is_enabled())
+		return;
+
+	if (eventid == QOS_L3_OCCUP_EVENT_ID || !mon->class)
+		return;
+
+	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
+	mon_comp = l3_dom->mon_comp[eventid];
+
+	reset_mon_cdp_safe(mon, mon_comp, USE_PRE_ALLOCATED, closid, rmid);
 }
 
 /* Reset an assigned counter */
@@ -1152,6 +1193,74 @@ static void mpam_resctrl_pick_counters(void)
 			counter_update_class(QOS_L3_MBM_TOTAL_EVENT_ID, class);
 		}
 	}
+}
+
+/*
+ * The controller uses resctrl's default counter assignment mode: every
+ * monitor group has a counter, and the driver chooses it rather than resctrl.
+ * Give every group in the capped space one of the monitors allocated at init,
+ * indexed by CLOSID and RMID. The mapping lasts for the whole mount and is
+ * not affected by domains coming and going: the monitors are valid in every
+ * domain of the class.
+ */
+static void mpam_resctrl_map_mbwu_mons(bool enable)
+{
+	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[QOS_L3_MBM_TOTAL_EVENT_ID];
+	u32 num_idx = resctrl_arch_system_num_rmid_idx();
+	u32 num_grp = mpam_capped_num_closid * mpam_capped_num_rmid;
+	u32 i;
+
+	if (!mon->mbwu_idx_to_mon || !mon->assigned_counters)
+		return;
+
+	if (!enable) {
+		memset(mon->mbwu_idx_to_mon, -1,
+		       num_idx * sizeof(*mon->mbwu_idx_to_mon));
+		return;
+	}
+
+	for (i = 0; i < num_grp; i++) {
+		u32 closid = i / mpam_capped_num_rmid;
+		u32 rmid = i % mpam_capped_num_rmid;
+
+		mon->mbwu_idx_to_mon[resctrl_arch_rmid_idx_encode(closid, rmid)] =
+			mon->assigned_counters[i];
+	}
+}
+
+/*
+ * The controller needs a bandwidth counter for every monitor group, so while
+ * it is enabled cap the CLOSIDs and the RMIDs per CLOSID to the number of
+ * counters, shrinking the RMIDs first, and give every group the counter it
+ * uses, see mpam_resctrl_map_mbwu_mons(). The number of monitor groups
+ * changes, and so does the limbo threshold. CDP hides the MBA resource, so
+ * it cannot be enabled together with the controller and needs no adjustment
+ * here.
+ */
+void resctrl_arch_set_mba_sc(bool enable)
+{
+	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[QOS_L3_MBM_TOTAL_EVENT_ID];
+	struct rdt_resource *l3 = &mpam_resctrl_controls[RDT_RESOURCE_L3].resctrl_res;
+	u32 num_closid = mpam_partid_max + 1;
+	u32 num_rmid = mpam_pmg_max + 1;
+
+	if (enable && mon->class) {
+		u32 num_mon = mon->class->props.num_mbwu_mon;
+
+		num_closid = min(num_closid, num_mon);
+		num_rmid = clamp(num_mon / num_closid, 1U, num_rmid);
+	}
+
+	mpam_capped_num_closid = num_closid;
+	mpam_capped_num_rmid = num_rmid;
+	mpam_resctrl_map_mbwu_mons(enable);
+	mba_sc_enabled = enable;
+
+	l3->mon.num_rmid = num_closid * num_rmid;
+
+	if (resctrl_rmid_realloc_limit)
+		resctrl_rmid_realloc_threshold =
+			resctrl_rmid_realloc_limit / (num_closid * num_rmid);
 }
 
 static void __config_cntr(struct mpam_resctrl_mon *mon, u32 cntr_id,
