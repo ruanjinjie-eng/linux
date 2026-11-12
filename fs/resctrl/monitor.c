@@ -673,6 +673,9 @@ static struct rdt_ctrl_domain *get_sc_ctrl_domain_from_cpu(int cpu,
  * with 10% granularity steps, check whether moving to 40% would go past
  * the limit by multiplying current bandwidth by "(30 + 10) / 30".
  *
+ * A zero min_bw lets the control reach zero, where the ratio is
+ * undefined. Take the step up without evaluating it.
+ *
  * Return: true when the control value changes, false otherwise.
  */
 static bool mba_sc_next_ctrl_val(struct rdt_resource *r_mba, u32 cur_msr_val,
@@ -683,9 +686,9 @@ static bool mba_sc_next_ctrl_val(struct rdt_resource *r_mba, u32 cur_msr_val,
 		return true;
 	}
 
-	if (cur_msr_val < MAX_MBA_BW &&
-	    user_bw > (cur_bw * (cur_msr_val + r_mba->membw.min_bw) /
-		       cur_msr_val)) {
+	if (cur_msr_val < MAX_MBA_BW && user_bw > cur_bw &&
+	    (cur_msr_val == 0 ||
+	     user_bw > (cur_bw * (cur_msr_val + r_mba->membw.bw_gran) / cur_msr_val))) {
 		*new_msr_val = cur_msr_val + r_mba->membw.bw_gran;
 		return true;
 	}
