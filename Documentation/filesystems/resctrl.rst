@@ -94,7 +94,10 @@ related to allocation:
 "num_closids":
 		The number of CLOSIDs which are valid for this
 		resource. The kernel uses the smallest number of
-		CLOSIDs of all enabled resources as limit.
+		CLOSIDs of all enabled resources as limit. While
+		mounted with the "mba_MBps" option this may be lower
+		on architectures that give every monitoring group a
+		counter from a shared pool.
 "cbm_mask":
 		The bitmask which is valid for this resource.
 		This mask is equivalent to 100%.
@@ -271,7 +274,10 @@ with the following files:
 
 "num_rmids":
 		The number of RMIDs supported by hardware for
-		L3 monitoring events.
+		L3 monitoring events. As with "num_closids", the
+		value may be lower while mounted with "mba_MBps" on
+		architectures that give every monitoring group a
+		counter from a shared pool.
 
 "mon_features":
 		Lists the monitoring events if
