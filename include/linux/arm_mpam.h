@@ -62,14 +62,8 @@ bool resctrl_arch_match_rmid(struct task_struct *tsk, u32 closid, u32 rmid);
 u32 resctrl_arch_rmid_idx_encode(u32 closid, u32 rmid);
 void resctrl_arch_rmid_idx_decode(u32 idx, u32 *closid, u32 *rmid);
 u32 resctrl_arch_system_num_rmid_idx(void);
-
-/* MPAM does not limit the RMIDs for the MBA software controller yet. */
-static inline void resctrl_arch_set_mba_sc(bool enable) { }
-
-static inline bool resctrl_arch_rmid_valid(u32 closid, u32 rmid)
-{
-	return true;
-}
+void resctrl_arch_set_mba_sc(bool enable);
+bool resctrl_arch_rmid_valid(u32 closid, u32 rmid);
 
 struct rdt_resource;
 void *resctrl_arch_mon_ctx_alloc(struct rdt_resource *r, enum resctrl_event_id evtid);
