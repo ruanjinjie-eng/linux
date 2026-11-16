@@ -43,9 +43,10 @@ enum resctrl_event_id {
 	QOS_FIRST_EVENT			= 0x01,
 
 	/*
-	 * Monitor event types. The resource an event belongs to is tracked
-	 * separately. These values match those used to program IA32_QM_EVTSEL
-	 * before reading IA32_QM_CTR on RDT systems.
+	 * Monitor event types. More than one resource may support the same
+	 * event type; the resource supplies the scope. These values match
+	 * those used to program IA32_QM_EVTSEL before reading IA32_QM_CTR on
+	 * RDT systems.
 	 */
 	QOS_OCCUP_EVENT_ID		= 0x01,
 	QOS_MBM_TOTAL_EVENT_ID		= 0x02,
