@@ -1041,6 +1041,38 @@ void mbm_setup_overflow_handler(struct rdt_l3_mon_domain *dom, unsigned long del
 		schedule_delayed_work_on(cpu, &dom->mbm_over, delay);
 }
 
+/*
+ * Re-decode the RMID entries of an earlier mount. The (CLOSID, RMID) pair an
+ * index decodes to depends on the mount options, e.g. CDP, so the entries
+ * built by an earlier mount can mean something different now: a free RMID
+ * would be handed to the wrong CLOSID, and the per-CLOSID dirty count of an
+ * RMID that stayed in limbo would not match the release path, which
+ * decrements the count of the CLOSID the entry decodes to now.
+ */
+static void rebuild_rmid_decoding(u32 idx_limit)
+{
+	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+	struct rmid_entry *entry;
+	u32 idx;
+
+	if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID)) {
+		u32 num_closid = resctrl_arch_get_num_closid(r);
+
+		memset(closid_num_dirty_rmid, 0,
+		       num_closid * sizeof(*closid_num_dirty_rmid));
+	}
+
+	for (idx = 0; idx < idx_limit; idx++) {
+		entry = &rmid_ptrs[idx];
+
+		resctrl_arch_rmid_idx_decode(idx, &entry->closid, &entry->rmid);
+
+		if (IS_ENABLED(CONFIG_RESCTRL_RMID_DEPENDS_ON_CLOSID) &&
+		    entry->busy)
+			closid_num_dirty_rmid[entry->closid]++;
+	}
+}
+
 int setup_rmid_lru_list(void)
 {
 	struct rmid_entry *entry = NULL;
@@ -1051,16 +1083,20 @@ int setup_rmid_lru_list(void)
 	if (!resctrl_arch_mon_capable())
 		return 0;
 
+	idx_limit = resctrl_arch_system_num_rmid_idx();
+
 	/*
 	 * Called on every mount, but the number of RMIDs cannot change
 	 * after the first mount, so keep using the same set of rmid_ptrs[]
-	 * until resctrl_exit(). Note that the RMIDs in limbo stay in limbo
-	 * across an unmount and are checked again after the next mount.
+	 * until resctrl_exit(). The RMIDs in limbo stay in limbo across an
+	 * unmount and are checked again after the next mount, so the
+	 * per-CLOSID dirty counts are rebuilt from the preserved state.
 	 */
-	if (rmid_ptrs)
+	if (rmid_ptrs) {
+		rebuild_rmid_decoding(idx_limit);
 		return 0;
+	}
 
-	idx_limit = resctrl_arch_system_num_rmid_idx();
 	rmid_ptrs = kzalloc_objs(struct rmid_entry, idx_limit);
 	if (!rmid_ptrs)
 		return -ENOMEM;

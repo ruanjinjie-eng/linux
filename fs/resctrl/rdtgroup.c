@@ -3231,10 +3231,6 @@ static int rdt_get_tree(struct fs_context *fc)
 		goto out;
 	}
 
-	ret = setup_rmid_lru_list();
-	if (ret)
-		goto out;
-
 	ret = rdtgroup_setup_root(ctx);
 	if (ret)
 		goto out;
@@ -3242,6 +3238,15 @@ static int rdt_get_tree(struct fs_context *fc)
 	ret = rdt_enable_ctx(ctx);
 	if (ret)
 		goto out_root;
+
+	/*
+	 * The (CLOSID, RMID) pair an index decodes to depends on the mount
+	 * options, e.g. CDP, so the RMID list has to be (re)built after
+	 * rdt_enable_ctx().
+	 */
+	ret = setup_rmid_lru_list();
+	if (ret)
+		goto out_schemata_free;
 
 	ret = schemata_list_create();
 	if (ret)
