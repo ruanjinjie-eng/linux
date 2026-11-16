@@ -54,7 +54,8 @@ static inline struct rdt_fs_context *rdt_fc2context(struct fs_context *fc)
 /**
  * struct mon_evt - Properties of a monitor event
  * @evtid:		event id
- * @rid:		resource id for this event
+ * @rid:		resource that implements this event, recorded by the
+ *			architecture when it enables the event
  * @name:		name of the event
  * @evt_cfg:		Event configuration value that represents the
  *			memory transactions (e.g., READS_TO_LOCAL_MEM,

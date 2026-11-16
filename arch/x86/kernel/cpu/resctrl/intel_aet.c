@@ -290,7 +290,7 @@ static bool enable_events(struct event_group *e, struct pmt_feature_group *p)
 	}
 
 	for (int j = 0; j < e->num_events; j++) {
-		if (!resctrl_enable_mon_event(e->evts[j].id, true,
+		if (!resctrl_enable_mon_event(r, e->evts[j].id, true,
 					      e->evts[j].bin_bits, &e->evts[j]))
 			skipped_events++;
 	}

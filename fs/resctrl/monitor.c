@@ -1015,11 +1015,10 @@ void free_rmid_lru_list(void)
 	mutex_unlock(&rdtgroup_mutex);
 }
 
-#define MON_EVENT(_eventid, _name, _res, _fp)	\
+#define MON_EVENT(_eventid, _name, _fp)		\
 	[_eventid] = {				\
 	.name			= _name,	\
 	.evtid			= _eventid,	\
-	.rid			= _res,		\
 	.is_floating_point	= _fp,		\
 }
 
@@ -1029,41 +1028,48 @@ void free_rmid_lru_list(void)
  * to set .enabled.
  */
 struct mon_evt mon_event_all[QOS_NUM_EVENTS] = {
-	MON_EVENT(QOS_OCCUP_EVENT_ID,			"llc_occupancy",	RDT_RESOURCE_L3,	false),
-	MON_EVENT(QOS_MBM_TOTAL_EVENT_ID,		"mbm_total_bytes",	RDT_RESOURCE_L3,	false),
-	MON_EVENT(QOS_MBM_LOCAL_EVENT_ID,		"mbm_local_bytes",	RDT_RESOURCE_L3,	false),
-	MON_EVENT(PMT_EVENT_ENERGY,			"core_energy",		RDT_RESOURCE_PERF_PKG,	true),
-	MON_EVENT(PMT_EVENT_ACTIVITY,			"activity",		RDT_RESOURCE_PERF_PKG,	true),
-	MON_EVENT(PMT_EVENT_STALLS_LLC_HIT,		"stalls_llc_hit",	RDT_RESOURCE_PERF_PKG,	false),
-	MON_EVENT(PMT_EVENT_C1_RES,			"c1_res",		RDT_RESOURCE_PERF_PKG,	false),
-	MON_EVENT(PMT_EVENT_UNHALTED_CORE_CYCLES,	"unhalted_core_cycles",	RDT_RESOURCE_PERF_PKG,	false),
-	MON_EVENT(PMT_EVENT_STALLS_LLC_MISS,		"stalls_llc_miss",	RDT_RESOURCE_PERF_PKG,	false),
-	MON_EVENT(PMT_EVENT_AUTO_C6_RES,		"c6_res",		RDT_RESOURCE_PERF_PKG,	false),
-	MON_EVENT(PMT_EVENT_UNHALTED_REF_CYCLES,	"unhalted_ref_cycles",	RDT_RESOURCE_PERF_PKG,	false),
-	MON_EVENT(PMT_EVENT_UOPS_RETIRED,		"uops_retired",		RDT_RESOURCE_PERF_PKG,	false),
-	MON_EVENT(PMT_EVENT_INST_RETIRED,		"inst_retired",		RDT_RESOURCE_PERF_PKG,	false),
-	MON_EVENT(PMT_EVENT_PCNT,			"pcnt",			RDT_RESOURCE_PERF_PKG,	false),
+	MON_EVENT(QOS_OCCUP_EVENT_ID,			"llc_occupancy",	false),
+	MON_EVENT(QOS_MBM_TOTAL_EVENT_ID,		"mbm_total_bytes",	false),
+	MON_EVENT(QOS_MBM_LOCAL_EVENT_ID,		"mbm_local_bytes",	false),
+	MON_EVENT(PMT_EVENT_ENERGY,			"core_energy",		true),
+	MON_EVENT(PMT_EVENT_ACTIVITY,			"activity",		true),
+	MON_EVENT(PMT_EVENT_STALLS_LLC_HIT,		"stalls_llc_hit",	false),
+	MON_EVENT(PMT_EVENT_C1_RES,			"c1_res",		false),
+	MON_EVENT(PMT_EVENT_UNHALTED_CORE_CYCLES,	"unhalted_core_cycles",	false),
+	MON_EVENT(PMT_EVENT_STALLS_LLC_MISS,		"stalls_llc_miss",	false),
+	MON_EVENT(PMT_EVENT_AUTO_C6_RES,		"c6_res",		false),
+	MON_EVENT(PMT_EVENT_UNHALTED_REF_CYCLES,	"unhalted_ref_cycles",	false),
+	MON_EVENT(PMT_EVENT_UOPS_RETIRED,		"uops_retired",		false),
+	MON_EVENT(PMT_EVENT_INST_RETIRED,		"inst_retired",		false),
+	MON_EVENT(PMT_EVENT_PCNT,			"pcnt",			false),
 };
 
-bool resctrl_enable_mon_event(enum resctrl_event_id eventid, bool any_cpu,
+bool resctrl_enable_mon_event(struct rdt_resource *r,
+			      enum resctrl_event_id eventid, bool any_cpu,
 			      unsigned int binary_bits, void *arch_priv)
 {
+	struct mon_evt *mevt;
+
 	if (WARN_ON_ONCE(eventid < QOS_FIRST_EVENT || eventid >= QOS_NUM_EVENTS ||
 			 binary_bits > MAX_BINARY_BITS))
 		return false;
-	if (mon_event_all[eventid].enabled) {
-		pr_warn("Duplicate enable for event %d\n", eventid);
+
+	mevt = &mon_event_all[eventid];
+	if (mevt->enabled) {
+		pr_warn("Duplicate enable for event %d on resource %d\n",
+			eventid, r->rid);
 		return false;
 	}
-	if (binary_bits && !mon_event_all[eventid].is_floating_point) {
+	if (binary_bits && !mevt->is_floating_point) {
 		pr_warn("Event %d may not be floating point\n", eventid);
 		return false;
 	}
 
-	mon_event_all[eventid].any_cpu = any_cpu;
-	mon_event_all[eventid].binary_bits = binary_bits;
-	mon_event_all[eventid].arch_priv = arch_priv;
-	mon_event_all[eventid].enabled = true;
+	mevt->rid = r->rid;
+	mevt->any_cpu = any_cpu;
+	mevt->binary_bits = binary_bits;
+	mevt->arch_priv = arch_priv;
+	mevt->enabled = true;
 
 	return true;
 }
