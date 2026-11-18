@@ -1283,6 +1283,30 @@ static int cap_prctl_drop(unsigned long cap)
 	return commit_creds(new);
 }
 
+static int cap_bset_drop_thread(kernel_cap_t mask)
+{
+	struct cred *new;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+	new->cap_bset = cap_drop(new->cap_bset, mask);
+	return commit_creds(new);
+}
+
+static int cap_prctl_drop_mask(unsigned long low, unsigned long high)
+{
+	kernel_cap_t mask = mk_kernel_cap((u32)low, (u32)high);
+
+	if (cap_isclear(mask))
+		return 0;
+
+	if (!ns_capable(current_user_ns(), CAP_SETPCAP))
+		return -EPERM;
+
+	return cap_bset_drop_thread(mask);
+}
+
 /**
  * cap_task_prctl - Implement process control functions for this security module
  * @option: The process control function requested
@@ -1312,6 +1336,11 @@ int cap_task_prctl(int option, unsigned long arg2, unsigned long arg3,
 
 	case PR_CAPBSET_DROP:
 		return cap_prctl_drop(arg2);
+
+	case PR_CAPBSET_DROP_MASK:
+		if (arg4 || arg5)
+			return -EINVAL;
+		return cap_prctl_drop_mask(arg2, arg3);
 
 	/*
 	 * The next four prctl's remain to assist with transitioning a
