@@ -98,6 +98,9 @@ struct signal_struct {
 	int			quick_threads;
 	struct list_head	thread_head;
 
+	/* PR_CAPBSET_DROP_PROCESS mask, read locklessly */
+	atomic64_t		cap_bset_pending;
+
 	wait_queue_head_t	wait_chldexit;	/* for wait4() */
 
 	/* current thread group signal load-balancing target: */

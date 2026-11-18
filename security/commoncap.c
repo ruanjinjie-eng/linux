@@ -3,6 +3,7 @@
  */
 
 #include <linux/capability.h>
+#include <linux/cred.h>
 #include <linux/audit.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -19,6 +20,7 @@
 #include <linux/hugetlb.h>
 #include <linux/mount.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/prctl.h>
 #include <linux/securebits.h>
 #include <linux/user_namespace.h>
@@ -29,6 +31,17 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/capability.h>
+
+/* A process-wide drop may not be in every thread's cred yet. */
+kernel_cap_t cap_bset_effective(const struct task_struct *task,
+				const struct cred *cred)
+{
+	kernel_cap_t pending = {
+		.val = atomic64_read(&task->signal->cap_bset_pending),
+	};
+
+	return cap_drop(cred->cap_bset, pending);
+}
 
 /*
  * If a non-root user executes a setuid-root binary in
@@ -284,7 +297,7 @@ int cap_capset(struct cred *new,
 
 	if (!cap_issubset(*inheritable,
 			  cap_combine(old->cap_inheritable,
-				      old->cap_bset)))
+				      cap_bset_effective(current, old))))
 		/* no new pI capabilities outside bounding set */
 		return -EPERM;
 
@@ -849,7 +862,7 @@ static void handle_privileged_root(struct linux_binprm *bprm, bool has_fcap,
 	 */
 	if (__is_eff(root_uid, new) || __is_real(root_uid, new)) {
 		/* pP' = (cap_bset & ~0) | (pI & ~0) */
-		new->cap_permitted = cap_combine(old->cap_bset,
+		new->cap_permitted = cap_combine(new->cap_bset,
 						 old->cap_inheritable);
 	}
 	/*
@@ -924,6 +937,8 @@ int cap_bprm_creds_from_file(struct linux_binprm *bprm, const struct file *file)
 	bool effective = false, has_fcap = false, id_changed;
 	int ret;
 	kuid_t root_uid;
+
+	new->cap_bset = cap_bset_effective(current, new);
 
 	if (WARN_ON(!cap_ambient_invariant_ok(old)))
 		return -EPERM;
@@ -1294,7 +1309,49 @@ static int cap_bset_drop_thread(kernel_cap_t mask)
 	return commit_creds(new);
 }
 
-static int cap_prctl_drop_mask(unsigned long low, unsigned long high)
+static int cap_bset_drop_process(kernel_cap_t mask)
+{
+	kernel_cap_t pending;
+	struct cred *new;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+
+	/* Serializes with cap_bset_drop_fork() so that no new task misses it. */
+	spin_lock_irq(&current->sighand->siglock);
+	atomic64_or(mask.val, &current->signal->cap_bset_pending);
+	pending.val = atomic64_read(&current->signal->cap_bset_pending);
+	spin_unlock_irq(&current->sighand->siglock);
+
+	new->cap_bset = cap_drop(new->cap_bset, pending);
+	commit_creds(new);
+
+	return 0;
+}
+
+/* Called under current->sighand->siglock. */
+void cap_bset_drop_fork(struct task_struct *p, u64 clone_flags)
+{
+	kernel_cap_t mask = {
+		.val = atomic64_read(&current->signal->cap_bset_pending),
+	};
+
+	if (cap_isclear(mask) || p->signal == current->signal ||
+	    (clone_flags & CLONE_NEWUSER))
+		return;
+
+	atomic64_or(mask.val, &p->signal->cap_bset_pending);
+}
+
+/* Only a single-threaded task can switch user namespace. */
+void cap_bset_drop_reset(struct task_struct *task)
+{
+	atomic64_set(&task->signal->cap_bset_pending, 0);
+}
+
+static int cap_prctl_drop_mask(unsigned long low, unsigned long high,
+			       bool process)
 {
 	kernel_cap_t mask = mk_kernel_cap((u32)low, (u32)high);
 
@@ -1304,6 +1361,8 @@ static int cap_prctl_drop_mask(unsigned long low, unsigned long high)
 	if (!ns_capable(current_user_ns(), CAP_SETPCAP))
 		return -EPERM;
 
+	if (process)
+		return cap_bset_drop_process(mask);
 	return cap_bset_drop_thread(mask);
 }
 
@@ -1332,7 +1391,7 @@ int cap_task_prctl(int option, unsigned long arg2, unsigned long arg3,
 	case PR_CAPBSET_READ:
 		if (!cap_valid(arg2))
 			return -EINVAL;
-		return !!cap_raised(old->cap_bset, arg2);
+		return !!cap_raised(cap_bset_effective(current, old), arg2);
 
 	case PR_CAPBSET_DROP:
 		return cap_prctl_drop(arg2);
@@ -1340,7 +1399,12 @@ int cap_task_prctl(int option, unsigned long arg2, unsigned long arg3,
 	case PR_CAPBSET_DROP_MASK:
 		if (arg4 || arg5)
 			return -EINVAL;
-		return cap_prctl_drop_mask(arg2, arg3);
+		return cap_prctl_drop_mask(arg2, arg3, false);
+
+	case PR_CAPBSET_DROP_PROCESS_MASK:
+		if (arg4 || arg5)
+			return -EINVAL;
+		return cap_prctl_drop_mask(arg2, arg3, true);
 
 	/*
 	 * The next four prctl's remain to assist with transitioning a

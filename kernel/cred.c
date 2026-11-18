@@ -400,6 +400,10 @@ int commit_creds(struct cred *new)
 		smp_wmb();
 	}
 
+	/* a new user namespace starts with a full bounding set */
+	if (new->user_ns != old->user_ns)
+		cap_bset_drop_reset(task);
+
 	/* alter the thread keyring */
 	if (!uid_eq(new->fsuid, old->fsuid))
 		key_fsuid_changed(new);
