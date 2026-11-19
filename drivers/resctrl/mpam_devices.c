@@ -3387,8 +3387,15 @@ void mpam_enable(struct work_struct *work)
 		mpam_enable_once();
 }
 
+/*
+ * Adopting a feature is a change even when the value equals the stored one:
+ * 0 is a valid value for several controls, and the stored configuration may
+ * not match the hardware if resetting the MSC registers failed.
+ */
 #define maybe_update_config(cfg, feature, newcfg, member, changes) do { \
-	if (mpam_has_feature(feature, newcfg) &&			\
+	if (!mpam_has_feature(feature, newcfg))				\
+		break;							\
+	if (!mpam_has_feature(feature, cfg) ||				\
 	    (newcfg)->member != (cfg)->member) {			\
 		(cfg)->member = (newcfg)->member;			\
 		mpam_set_feature(feature, cfg);				\
