@@ -3388,7 +3388,10 @@ void mpam_enable(struct work_struct *work)
 }
 
 #define maybe_update_config(cfg, feature, newcfg, member, changes) do { \
-	if (mpam_has_feature(feature, newcfg) &&			\
+	if (!mpam_has_feature(feature, newcfg))				\
+		break;							\
+									\
+	if (!mpam_has_feature(feature, cfg) ||				\
 	    (newcfg)->member != (cfg)->member) {			\
 		(cfg)->member = (newcfg)->member;			\
 		mpam_set_feature(feature, cfg);				\
