@@ -242,12 +242,14 @@ static struct rmid_entry *resctrl_find_free_rmid(u32 closid)
 		 * to be if it were used with this CLOSID.
 		 * If the CLOSID is irrelevant on this architecture, the two
 		 * index values are always the same on every entry and thus the
-		 * very first entry will be returned.
+		 * very first entry will be returned. Skip the RMIDs the
+		 * architecture does not allow.
 		 */
 		itr_idx = resctrl_arch_rmid_idx_encode(itr->closid, itr->rmid);
 		cmp_idx = resctrl_arch_rmid_idx_encode(closid, itr->rmid);
 
-		if (itr_idx == cmp_idx)
+		if (itr_idx == cmp_idx &&
+		    resctrl_arch_rmid_valid(closid, itr->rmid))
 			return itr;
 	}
 
@@ -271,7 +273,9 @@ static struct rmid_entry *resctrl_find_free_rmid(u32 closid)
  *
  * MPAM's equivalent of RMID are per-CLOSID, meaning a freshly allocated CLOSID
  * may not be able to allocate clean RMID. To avoid this the allocator will
- * choose the CLOSID with the most clean RMID.
+ * choose the CLOSID with the most clean RMID. A CLOSID the architecture
+ * cannot allocate an RMID for is skipped: some of its RMIDs may be refused,
+ * and the rest may all be in limbo.
  *
  * When the CLOSID and RMID are independent numbers, the first free CLOSID will
  * be returned.
@@ -281,6 +285,7 @@ static struct rmid_entry *resctrl_find_free_rmid(u32 closid)
 int resctrl_find_cleanest_closid(void)
 {
 	u32 cleanest_closid = ~0;
+	u32 unusable_closid = ~0;
 	int i = 0;
 
 	lockdep_assert_held(&rdtgroup_mutex);
@@ -294,9 +299,23 @@ int resctrl_find_cleanest_closid(void)
 		if (closid_allocated(i))
 			continue;
 
+		/*
+		 * A free CLOSID with no RMID in limbo has all its RMIDs on the
+		 * free list, and the architecture allows at least one of them.
+		 */
 		num_dirty = closid_num_dirty_rmid[i];
 		if (num_dirty == 0)
 			return i;
+
+		/*
+		 * Leave a CLOSID that cannot allocate for last so that
+		 * alloc_rmid() can still report why the RMID allocation failed.
+		 */
+		if (IS_ERR(resctrl_find_free_rmid(i))) {
+			if (unusable_closid == ~0)
+				unusable_closid = i;
+			continue;
+		}
 
 		if (cleanest_closid == ~0)
 			cleanest_closid = i;
@@ -305,10 +324,13 @@ int resctrl_find_cleanest_closid(void)
 			cleanest_closid = i;
 	}
 
-	if (cleanest_closid == ~0)
-		return -ENOSPC;
+	if (cleanest_closid != ~0)
+		return cleanest_closid;
 
-	return cleanest_closid;
+	if (unusable_closid != ~0)
+		return unusable_closid;
+
+	return -ENOSPC;
 }
 
 /*

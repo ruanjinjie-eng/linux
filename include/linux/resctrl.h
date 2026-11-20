@@ -416,7 +416,11 @@ static inline u32 resctrl_get_default_ctrl(struct rdt_resource *r)
 	return WARN_ON_ONCE(1);
 }
 
-/* The number of closid supported by this resource regardless of CDP */
+/*
+ * The number of closid supported by this resource regardless of CDP. It may
+ * change when the MBA software controller is enabled or disabled, see
+ * resctrl_arch_set_mba_sc(), and is stable while resctrl is mounted.
+ */
 u32 resctrl_arch_get_num_closid(struct rdt_resource *r);
 u32 resctrl_arch_system_num_rmid_idx(void);
 int resctrl_arch_update_domains(struct rdt_resource *r, u32 closid);
