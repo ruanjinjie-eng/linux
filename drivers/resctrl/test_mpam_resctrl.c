@@ -296,7 +296,61 @@ static void test_percent_to_max_rounding(struct kunit *test)
 	KUNIT_EXPECT_LE(test, 4 * num_rounded_up, 3 * total);
 }
 
+struct cap_case {
+	u32	num_closid;	/* hardware limits that come in */
+	u32	num_rmid;
+	u32	num_mon;	/* monitors to measure with */
+	u32	exp_closid;
+	u32	exp_rmid;
+};
+
+/*
+ * The groups of the capped space must each have a monitor, so
+ * exp_closid * exp_rmid <= num_mon, and no CLOSID is left without an RMID.
+ */
+static const struct cap_case cap_cases[] = {
+	/* One monitor: only the default group of the default CLOSID. */
+	{ 32, 2, 1, 1, 1 },
+	/* Fewer monitors than CLOSIDs: each CLOSID keeps its default group. */
+	{ 32, 2, 2, 2, 1 },
+	{ 32, 2, 3, 3, 1 },
+	{ 32, 1, 7, 7, 1 },
+	{ 32, 1, 8, 8, 1 },
+	/* RMIDs shrink first: all CLOSIDs, then as many RMIDs as fit. */
+	{ 32, 4, 64, 32, 2 },
+	{ 32, 4, 96, 32, 3 },
+	{ 32, 4, 128, 32, 4 },
+	/* The monitors cover everything, so nothing is capped. */
+	{ 32, 4, 1000, 32, 4 },
+	{ 4, 2, 8, 4, 2 },
+	/* A single CLOSID and PMG. */
+	{ 1, 1, 8, 1, 1 },
+};
+
+static void test_cap_closid_rmid(struct kunit *test)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(cap_cases); i++) {
+		const struct cap_case *c = &cap_cases[i];
+		u32 num_closid = c->num_closid;
+		u32 num_rmid = c->num_rmid;
+
+		mpam_resctrl_cap_closid_rmid(c->num_mon, &num_closid, &num_rmid);
+
+		KUNIT_EXPECT_EQ_MSG(test, num_closid, c->exp_closid,
+				    "case %d: %u closids, %u rmids, %u monitors",
+				    i, c->num_closid, c->num_rmid, c->num_mon);
+		KUNIT_EXPECT_EQ_MSG(test, num_rmid, c->exp_rmid,
+				    "case %d: %u closids, %u rmids, %u monitors",
+				    i, c->num_closid, c->num_rmid, c->num_mon);
+		KUNIT_EXPECT_LE_MSG(test, num_closid * num_rmid, c->num_mon,
+				    "case %d: more groups than monitors", i);
+	}
+}
+
 static struct kunit_case mpam_resctrl_test_cases[] = {
+	KUNIT_CASE(test_cap_closid_rmid),
 	KUNIT_CASE(test_get_mba_granularity),
 	KUNIT_CASE_PARAM(test_mbw_max_to_percent, test_percent_value_gen_params),
 	KUNIT_CASE_PARAM(test_percent_to_mbw_max, test_percent_value_gen_params),
