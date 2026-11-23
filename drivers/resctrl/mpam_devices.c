@@ -1025,8 +1025,20 @@ static int mpam_ris_hw_probe(struct mpam_msc_ris *ris)
 		 */
 		props->bwa_wd = min(props->bwa_wd, 16);
 
-		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MAX, mbw_features))
+		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MAX, mbw_features)) {
+			/*
+			 * MAX_LIM: 0b00 both limits, 0b01 the soft limit
+			 * only, 0b10 the hard limit only. 0b11 is reserved
+			 * and is treated as having no hard limit, so that
+			 * the software controller is refused rather than
+			 * rely on an unknown behavior.
+			 */
+			u32 max_lim = FIELD_GET(MPAMF_MBW_IDR_MAX_LIM, mbw_features);
+
+			props->has_hardlim = max_lim == 0 || max_lim == 2;
 			mpam_set_feature(mpam_feat_mbw_max, props);
+			mpam_set_feature(mpam_feat_max_limit, props);
+		}
 
 		if (props->bwa_wd && FIELD_GET(MPAMF_MBW_IDR_HAS_MIN, mbw_features))
 			mpam_set_feature(mpam_feat_mbw_min, props);
@@ -1911,16 +1923,21 @@ static int mpam_reprogram_ris_partid(struct mpam_msc_ris *ris, u16 partid,
 	}
 
 	if (mpam_has_feature(mpam_feat_mbw_max, rprops)) {
-		if (mpam_has_feature(mpam_feat_mbw_max, cfg)) {
-			ret = mpam_write_partsel_reg(msc, MBW_MAX, cfg->mbw_max);
-			if (ret)
-				return ret;
-		} else {
-			ret = mpam_write_partsel_reg(msc, MBW_MAX,
-						     MPAMCFG_MBW_MAX_MAX);
-			if (ret)
-				return ret;
-		}
+		u32 val = MPAMCFG_MBW_MAX_MAX;
+
+		if (mpam_has_feature(mpam_feat_mbw_max, cfg))
+			val = cfg->mbw_max;
+
+		/*
+		 * The hard-limit bit follows its own feature bit so that it
+		 * can be set without changing the maximum.
+		 */
+		if (mpam_has_feature(mpam_feat_max_limit, cfg) && cfg->max_limit)
+			val |= MPAMCFG_MBW_MAX_HARDLIM;
+
+		ret = mpam_write_partsel_reg(msc, MBW_MAX, val);
+		if (ret)
+			return ret;
 	}
 
 	if (mpam_has_feature(mpam_feat_mbw_prop, rprops)) {
@@ -2660,6 +2677,19 @@ static void __props_mismatch(struct mpam_props *parent,
 		pr_debug("took the min bwa_wd\n");
 		parent->bwa_wd = min(parent->bwa_wd, child->bwa_wd);
 	}
+
+	/*
+	 * The hard limit is only usable if every resource implements it.
+	 * Without mpam_feat_mbw_max there is no limit to describe, and the
+	 * flag is only read when the feature is present.
+	 */
+	if (CAN_MERGE_FEAT(parent, child, mpam_feat_mbw_max, alias))
+		parent->has_hardlim = child->has_hardlim;
+	else if (mpam_has_feature(mpam_feat_mbw_max, parent) &&
+		 mpam_has_feature(mpam_feat_mbw_max, child))
+		parent->has_hardlim &= child->has_hardlim;
+	else if (mpam_has_feature(mpam_feat_mbw_max, parent) && !alias)
+		parent->has_hardlim = false;
 
 	if (alias && !mpam_has_cmax_wd_feature(parent) && mpam_has_cmax_wd_feature(child)) {
 		parent->cmax_wd = child->cmax_wd;
@@ -3408,6 +3438,7 @@ static bool mpam_update_config(struct mpam_config *cfg,
 	maybe_update_config(cfg, mpam_feat_cpor_part, newcfg, cpbm, has_changes);
 	maybe_update_config(cfg, mpam_feat_mbw_part, newcfg, mbw_pbm, has_changes);
 	maybe_update_config(cfg, mpam_feat_mbw_max, newcfg, mbw_max, has_changes);
+	maybe_update_config(cfg, mpam_feat_max_limit, newcfg, max_limit, has_changes);
 
 	return has_changes;
 }
