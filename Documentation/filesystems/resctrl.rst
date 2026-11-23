@@ -47,7 +47,12 @@ mount options are:
 	Enable code/data prioritization in L2 cache allocations.
 "mba_MBps":
 	Enable the MBA Software Controller(mba_sc) to specify MBA
-	bandwidth in MiBps
+	bandwidth in MiBps. On architectures that assign MBM counters to
+	monitoring groups the default counter assignment mode is used
+	while the controller is enabled. The number of CLOSIDs and of
+	RMIDs may then be limited to the number of counters, and
+	"num_closids" and "num_rmids" report the limited numbers until
+	resctrl is unmounted.
 "debug":
 	Make debug files accessible. Available debug files are annotated with
 	"Available only with debug option".
@@ -387,6 +392,16 @@ with the following files:
 	events between reads resulting from hardware re-allocating counters. This can
 	result in misleading values or display "Unavailable" if no counter is assigned
 	to the event.
+
+	On an architecture whose assignment mode is fixed, mounting resctrl
+	with "mba_MBps" enables the default mode for the duration of the
+	mount. The architecture gives every monitoring group a counter, so
+	there is nothing to assign. Reading or writing "mbm_assign_on_mkdir",
+	"available_mbm_cntrs", "mbm_L3_assignments" and the files of
+	"event_configs" fails with -EINVAL and "last_cmd_status" explains why,
+	as it does in any default mode. "num_mbm_cntrs" still reports the
+	counters of the hardware, which may be more than the number of
+	monitoring groups that can be created, see "mba_MBps" above.
 
 	* To enable "mbm_event" counter assignment mode:
 	  ::

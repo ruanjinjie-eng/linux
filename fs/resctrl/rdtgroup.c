@@ -2642,10 +2642,10 @@ static void mba_sc_domain_destroy(struct rdt_resource *r,
  * The MBA software controller is supported only if MBM is supported and MBA is
  * in linear scale, and the MBM monitor scope is the same as MBA control scope.
  *
- * The software controller cannot be supported when the MBM counters are
- * assignable.  There is no guarantee that MBM counters are assigned to the
- * event backing the software controller in all monitoring domains of all
- * monitoring groups.
+ * The controller needs a counter for its event in every monitoring group.
+ * With assignable counters that requires a fixed assignment mode, whose
+ * architecture can provide the counters itself, as resctrl's default
+ * assignment mode assumes.
  *
  * The maximum control must also be a hard limit, see max_is_soft_limit.
  */
@@ -2658,7 +2658,8 @@ static bool supports_mba_mbps(void)
 		r->alloc_capable && is_mba_linear() &&
 		r->ctrl_scope == rmbm->mon_scope &&
 		!r->membw.max_is_soft_limit &&
-		!rmbm->mon.mbm_cntr_assignable);
+		(!rmbm->mon.mbm_cntr_assignable ||
+		 rmbm->mon.mbm_cntr_assign_fixed));
 }
 
 /*

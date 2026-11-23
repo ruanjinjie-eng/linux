@@ -496,6 +496,11 @@ int resctrl_arch_set_cdp_enabled(enum resctrl_res_level l, bool enable);
  *					    mode is enabled.
  * @r:		Pointer to the resource structure.
  *
+ * An architecture whose assignment mode is fixed (mbm_cntr_assign_fixed) can
+ * switch between the two modes itself, for example while the MBA software
+ * controller is enabled and it gives every monitoring group a counter. resctrl
+ * does not assign counters in the default mode.
+ *
  * Return:
  * true if the assignment mode is enabled, false otherwise.
  */
