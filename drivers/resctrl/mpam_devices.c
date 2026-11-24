@@ -23,6 +23,7 @@
 #include <linux/mailbox_client.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/printk.h>
 #include <linux/property.h>
 #include <linux/srcu.h>
@@ -2223,6 +2224,39 @@ static void _enable_percpu_irq(void *_irq)
 	enable_percpu_irq(*irq, IRQ_TYPE_NONE);
 }
 
+/* The MSC may have lost its state, restore it. */
+static void mpam_msc_power_on(struct mpam_msc *msc)
+{
+	mutex_lock(&msc->error_irq_lock);
+	if (msc->error_irq_hw_enabled)
+		mpam_touch_msc(msc, mpam_enable_msc_ecr, msc);
+	mutex_unlock(&msc->error_irq_lock);
+
+	mpam_reprogram_msc(msc);
+}
+
+/* The MSC may be about to lose its state, save what can't be rebuilt. */
+static void mpam_msc_power_off(struct mpam_msc *msc)
+{
+	struct mpam_msc_ris *ris;
+
+	mutex_lock(&msc->cfg_lock);
+	list_for_each_entry_srcu(ris, &msc->ris, msc_list,
+				 srcu_read_lock_held(&mpam_srcu)) {
+		mpam_touch_msc(msc, &mpam_reset_ris, ris);
+
+		/*
+		 * The reset state for non-zero partid may be
+		 * lost while the CPUs are offline.
+		 */
+		ris->in_reset_state = false;
+
+		if (mpam_is_enabled())
+			mpam_touch_msc(msc, &mpam_save_mbwu_state, ris);
+	}
+	mutex_unlock(&msc->cfg_lock);
+}
+
 static int mpam_cpu_online(unsigned int cpu)
 {
 	struct mpam_msc *msc;
@@ -2236,14 +2270,9 @@ static int mpam_cpu_online(unsigned int cpu)
 		if (msc->reenable_error_ppi)
 			_enable_percpu_irq(&msc->reenable_error_ppi);
 
-		if (atomic_fetch_inc(&msc->online_refs) == 0) {
-			mutex_lock(&msc->error_irq_lock);
-			if (msc->error_irq_hw_enabled)
-				mpam_touch_msc(msc, mpam_enable_msc_ecr, msc);
-			mutex_unlock(&msc->error_irq_lock);
-
-			mpam_reprogram_msc(msc);
-		}
+		if (atomic_fetch_inc(&msc->online_refs) == 0 &&
+		    !msc->pm_suspended)
+			mpam_msc_power_on(msc);
 	}
 
 	if (mpam_resctrl_enabled)
@@ -2304,29 +2333,61 @@ static int mpam_cpu_offline(unsigned int cpu)
 		if (msc->reenable_error_ppi)
 			disable_percpu_irq(msc->reenable_error_ppi);
 
-		if (atomic_dec_and_test(&msc->online_refs)) {
-			struct mpam_msc_ris *ris;
-
-			mutex_lock(&msc->cfg_lock);
-			list_for_each_entry_srcu(ris, &msc->ris, msc_list,
-						 srcu_read_lock_held(&mpam_srcu)) {
-				mpam_touch_msc(msc, &mpam_reset_ris, ris);
-
-				/*
-				 * The reset state for non-zero partid may be
-				 * lost while the CPUs are offline.
-				 */
-				ris->in_reset_state = false;
-
-				if (mpam_is_enabled())
-					mpam_touch_msc(msc, &mpam_save_mbwu_state, ris);
-			}
-			mutex_unlock(&msc->cfg_lock);
-		}
+		if (atomic_dec_and_test(&msc->online_refs) &&
+		    !msc->pm_suspended)
+			mpam_msc_power_off(msc);
 	}
 
 	return 0;
 }
+
+/*
+ * System sleep keeps the CPU that suspends the system online, so the MSCs it
+ * can access are never seen going offline by the cpuhp callbacks. Those MSCs
+ * may still lose power. Save and restore every MSC that is online here, and
+ * stop the cpuhp callbacks from saving or restoring it a second time while
+ * the other CPUs go offline and come back.
+ */
+static int mpam_msc_suspend(struct device *dev)
+{
+	struct mpam_msc *msc = dev_get_drvdata(dev);
+
+	guard(mutex)(&mpam_cpuhp_state_lock);
+	if (!msc || !mpam_is_enabled())
+		return 0;
+
+	guard(cpus_read_lock)();
+	guard(srcu)(&mpam_srcu);
+	if (atomic_read(&msc->online_refs)) {
+		mpam_msc_power_off(msc);
+		msc->pm_suspended = true;
+	}
+
+	return 0;
+}
+
+static int mpam_msc_resume(struct device *dev)
+{
+	struct mpam_msc *msc = dev_get_drvdata(dev);
+
+	guard(mutex)(&mpam_cpuhp_state_lock);
+	if (!msc)
+		return 0;
+
+	guard(cpus_read_lock)();
+	guard(srcu)(&mpam_srcu);
+	if (!msc->pm_suspended)
+		return 0;
+
+	msc->pm_suspended = false;
+	if (mpam_is_enabled() && atomic_read(&msc->online_refs))
+		mpam_msc_power_on(msc);
+
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(mpam_msc_pm_ops, mpam_msc_suspend,
+				mpam_msc_resume);
 
 static void mpam_register_cpuhp_callbacks(int (*online)(unsigned int online),
 					  int (*offline)(unsigned int offline),
@@ -2578,6 +2639,7 @@ static struct platform_driver mpam_msc_driver = {
 	.driver = {
 		.name = "mpam_msc",
 		.suppress_bind_attrs = true,
+		.pm = pm_sleep_ptr(&mpam_msc_pm_ops),
 	},
 	.probe = mpam_msc_drv_probe,
 	.remove = mpam_msc_drv_remove,

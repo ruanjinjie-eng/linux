@@ -88,6 +88,12 @@ struct mpam_msc {
 	atomic_t		online_refs;
 
 	/*
+	 * Set while the MSC state is saved for system sleep. The CPU hotplug
+	 * callbacks then leave the MSC alone. Protected by the cpus lock.
+	 */
+	bool			pm_suspended;
+
+	/*
 	 * probe_lock is only taken during discovery. After discovery these
 	 * properties become read-only and the lists are protected by SRCU.
 	 */
