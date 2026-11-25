@@ -88,6 +88,13 @@ struct mpam_msc {
 	atomic_t		online_refs;
 
 	/*
+	 * Set while the MSC state is saved for system sleep. The cpuhp
+	 * callbacks then leave the MSC alone, and the monitor reads and
+	 * config writes skip the hardware.
+	 */
+	bool			pm_suspended;
+
+	/*
 	 * probe_lock is only taken during discovery. After discovery these
 	 * properties become read-only and the lists are protected by SRCU.
 	 */

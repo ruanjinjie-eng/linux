@@ -23,6 +23,7 @@
 #include <linux/mailbox_client.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/printk.h>
 #include <linux/property.h>
 #include <linux/srcu.h>
@@ -1601,7 +1602,16 @@ static void __ris_msmon_read(void *arg)
 		return;
 	}
 
-	__ris_msmon_read_locked(m);
+	/*
+	 * A read would re-enable the monitor disabled for system sleep
+	 * and restart its counter from zero, only to read back NRDY.
+	 * Report the counter as unavailable instead of -EBUSY, which the
+	 * resctrl workers would keep retrying.
+	 */
+	if (READ_ONCE(msc->pm_suspended))
+		m->err = -EINVAL;
+	else
+		__ris_msmon_read_locked(m);
 
 	mpam_mon_sel_unlock(msc);
 }
@@ -2267,7 +2277,7 @@ static int mpam_cpu_online(unsigned int cpu)
 		if (msc->reenable_error_ppi)
 			_enable_percpu_irq(&msc->reenable_error_ppi);
 
-		if (atomic_fetch_inc(&msc->online_refs) == 0)
+		if (atomic_fetch_inc(&msc->online_refs) == 0 && !READ_ONCE(msc->pm_suspended))
 			mpam_msc_power_on(msc);
 	}
 
@@ -2329,12 +2339,64 @@ static int mpam_cpu_offline(unsigned int cpu)
 		if (msc->reenable_error_ppi)
 			disable_percpu_irq(msc->reenable_error_ppi);
 
-		if (atomic_dec_and_test(&msc->online_refs))
+		if (atomic_dec_and_test(&msc->online_refs) && !READ_ONCE(msc->pm_suspended))
 			mpam_msc_power_off(msc);
 	}
 
 	return 0;
 }
+
+static int mpam_msc_suspend(struct device *dev)
+{
+	struct mpam_msc *msc = dev_get_drvdata(dev);
+
+	if (!msc)
+		return 0;
+
+	guard(mutex)(&mpam_cpuhp_state_lock);
+	if (!mpam_is_enabled())
+		return 0;
+
+	guard(cpus_read_lock)();
+	guard(srcu)(&mpam_srcu);
+	if (!atomic_read(&msc->online_refs))
+		return 0;
+
+	/*
+	 * The save disables the monitors. Set the flag before it so the
+	 * resctrl workers stop reading them: a reader takes cfg_lock or
+	 * mon_sel_lock, and the save takes both, so a read either completes
+	 * before the save or sees the flag.
+	 */
+	WRITE_ONCE(msc->pm_suspended, true);
+	mpam_msc_power_off(msc);
+
+	return 0;
+}
+
+static int mpam_msc_resume(struct device *dev)
+{
+	struct mpam_msc *msc = dev_get_drvdata(dev);
+
+	if (!msc)
+		return 0;
+
+	guard(mutex)(&mpam_cpuhp_state_lock);
+	if (!mpam_is_enabled() || !READ_ONCE(msc->pm_suspended))
+		return 0;
+
+	guard(cpus_read_lock)();
+	guard(srcu)(&mpam_srcu);
+	if (atomic_read(&msc->online_refs))
+		mpam_msc_power_on(msc);
+
+	/* Let the monitor reads back in once the state is restored. */
+	WRITE_ONCE(msc->pm_suspended, false);
+
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(mpam_msc_pm_ops, mpam_msc_suspend, mpam_msc_resume);
 
 static void mpam_register_cpuhp_callbacks(int (*online)(unsigned int online),
 					  int (*offline)(unsigned int offline),
@@ -2586,6 +2648,7 @@ static struct platform_driver mpam_msc_driver = {
 	.driver = {
 		.name = "mpam_msc",
 		.suppress_bind_attrs = true,
+		.pm = pm_sleep_ptr(&mpam_msc_pm_ops),
 	},
 	.probe = mpam_msc_drv_probe,
 	.remove = mpam_msc_drv_remove,
@@ -3443,6 +3506,13 @@ int mpam_apply_config(struct mpam_component *comp, u16 partid,
 		msc = vmsc->msc;
 
 		guard(mutex)(&msc->cfg_lock);
+		/*
+		 * The cache was updated above; the MSC is reprogrammed from
+		 * it on resume, so this write is not lost.
+		 */
+		if (READ_ONCE(msc->pm_suspended))
+			continue;
+
 		list_for_each_entry_srcu(ris, &vmsc->ris, vmsc_list,
 					 srcu_read_lock_held(&mpam_srcu)) {
 			arg.ris = ris;
