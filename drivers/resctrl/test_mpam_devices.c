@@ -25,6 +25,50 @@ static void test__props_mismatch(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, memcmp(&parent, &child, sizeof(child)), 0);
 }
 
+/*
+ * __props_mismatch() keeps has_hardlim only where every resource implements
+ * the hard limit. Walk every combination of the feature and the flag on the
+ * two sides, for aliasing and non-aliasing resources.
+ */
+static void test__props_mismatch_hardlim(struct kunit *test)
+{
+	int i;
+
+	for (i = 0; i < 32; i++) {
+		bool alias = i & BIT(0);
+		bool has_p = i & BIT(1);
+		bool has_c = i & BIT(2);
+		bool hard_p = i & BIT(3);
+		bool hard_c = i & BIT(4);
+		struct mpam_props parent = { 0 };
+		struct mpam_props child = { 0 };
+		bool expect_feat, expect_hard;
+
+		if (has_p)
+			mpam_set_feature(mpam_feat_mbw_max, &parent);
+		if (has_c)
+			mpam_set_feature(mpam_feat_mbw_max, &child);
+		parent.has_hardlim = hard_p;
+		child.has_hardlim = hard_c;
+
+		__props_mismatch(&parent, &child, alias);
+
+		/* Aliasing resources take either, the others need both. */
+		expect_feat = alias ? (has_p || has_c) : (has_p && has_c);
+		if (has_p && has_c)
+			expect_hard = hard_p && hard_c;
+		else
+			expect_hard = has_c ? hard_c : hard_p;
+
+		KUNIT_EXPECT_EQ_MSG(test, mpam_has_feature(mpam_feat_mbw_max, &parent),
+				    expect_feat, "case %d", i);
+		/* The flag only has a meaning together with the feature. */
+		if (expect_feat)
+			KUNIT_EXPECT_EQ_MSG(test, parent.has_hardlim, expect_hard,
+					    "case %d", i);
+	}
+}
+
 static struct list_head fake_classes_list;
 static struct mpam_class fake_class = { 0 };
 static struct mpam_component fake_comp1 = { 0 };
@@ -386,6 +430,7 @@ static struct kunit_case mpam_devices_test_cases[] = {
 	KUNIT_CASE(test_mpam_reset_msc_bitmap),
 	KUNIT_CASE(test_mpam_enable_merge_features),
 	KUNIT_CASE(test__props_mismatch),
+	KUNIT_CASE(test__props_mismatch_hardlim),
 	{}
 };
 
