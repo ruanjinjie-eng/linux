@@ -47,7 +47,12 @@ mount options are:
 	Enable code/data prioritization in L2 cache allocations.
 "mba_MBps":
 	Enable the MBA Software Controller(mba_sc) to specify MBA
-	bandwidth in MiBps
+	bandwidth in MiBps. On architectures that assign MBM counters to
+	monitoring groups the default counter assignment mode is used
+	while the controller is enabled. The number of CLOSIDs and of
+	RMIDs may then be limited to the number of counters, and
+	"num_closids" and "num_rmids" report the limited numbers until
+	resctrl is unmounted, when the mode the user selected is restored.
 "debug":
 	Make debug files accessible. Available debug files are annotated with
 	"Available only with debug option".
@@ -391,6 +396,8 @@ with the following files:
 	limited to the number of counters: "num_rmids" reports the limited
 	number, "num_closids" keeps the value from the mount, and monitoring
 	groups beyond them cannot be read until the mode is switched back.
+	While the MBA software controller is enabled the mode cannot be
+	switched back, as the controller measures every monitoring group.
 
 	* To enable "mbm_event" counter assignment mode:
 	  ::
