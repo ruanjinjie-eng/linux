@@ -385,6 +385,13 @@ with the following files:
 	In default mode, resctrl assumes there is a hardware counter for each
 	event within every CTRL_MON and MON group.
 
+	On an architecture that assigns the counters from a shared pool, such
+	as MPAM, switching to the default mode gives every monitoring group
+	one of the counters. The number of CLOSIDs and of RMIDs is then
+	limited to the number of counters: "num_rmids" reports the limited
+	number, "num_closids" keeps the value from the mount, and monitoring
+	groups beyond them cannot be read until the mode is switched back.
+
 	* To enable "mbm_event" counter assignment mode:
 	  ::
 

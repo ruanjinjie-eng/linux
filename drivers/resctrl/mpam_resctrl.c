@@ -63,6 +63,20 @@ static DEFINE_MUTEX(domain_list_lock);
 static bool cdp_enabled;
 
 /*
+ * The CLOSIDs and the RMIDs per CLOSID resctrl may use while the default
+ * counter assignment mode is used. Set by resctrl_arch_mbm_cntr_assign_set().
+ */
+static u32 mpam_capped_num_closid;
+static u32 mpam_capped_num_rmid;
+
+/*
+ * True while the L3 resource uses the "mbm_event" counter assignment mode.
+ * The mode at boot is "mbm_event"; on a system without the counters the
+ * hook is gated by mbm_cntr_assignable instead.
+ */
+static bool mbm_cntr_assign_enabled = true;
+
+/*
  * We use cacheinfo to discover the size of the caches and their id. cacheinfo
  * populates this from a device_initcall(). mpam_resctrl_setup() must wait.
  */
@@ -114,19 +128,10 @@ void resctrl_arch_reset_rmid_all(struct rdt_resource *r, struct rdt_l3_mon_domai
 {
 }
 
-void resctrl_arch_reset_rmid(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
-			     u32 closid, u32 rmid, enum resctrl_event_id eventid)
-{
-}
-
 bool resctrl_arch_mbm_cntr_assign_enabled(struct rdt_resource *r)
 {
-	return (r == &mpam_resctrl_controls[RDT_RESOURCE_L3].resctrl_res);
-}
-
-int resctrl_arch_mbm_cntr_assign_set(struct rdt_resource *r, bool enable)
-{
-	return -EINVAL;
+	return mbm_cntr_assign_enabled && r->mon.mbm_cntr_assignable &&
+	       (r == &mpam_resctrl_controls[RDT_RESOURCE_L3].resctrl_res);
 }
 
 int resctrl_arch_io_alloc_enable(struct rdt_resource *r, bool enable)
@@ -191,19 +196,24 @@ static void mpam_resctrl_monitor_sync_abmc_vals(struct rdt_resource *l3)
 	 */
 }
 
-/* The RMID count follows the CLOSIDs resctrl uses. */
+/*
+ * The RMID count follows the CLOSIDs resctrl uses and the RMIDs it may use
+ * for each of them: CDP halves the CLOSIDs, and the default assignment mode
+ * caps both, see resctrl_arch_mbm_cntr_assign_set().
+ */
 static void mpam_resctrl_set_num_rmid(void)
 {
 	struct rdt_resource *l3 = &mpam_resctrl_controls[RDT_RESOURCE_L3].resctrl_res;
+	u32 num_rmid = mbm_cntr_assign_enabled ? mpam_pmg_max + 1 : mpam_capped_num_rmid;
 	u32 num_closid = 1;
 
 	if (resctrl_arch_alloc_capable()) {
-		num_closid = mpam_partid_max + 1;
+		num_closid = resctrl_arch_get_num_closid(NULL);
 		if (cdp_enabled)
 			num_closid /= 2;
 	}
 
-	l3->mon.num_rmid = (mpam_pmg_max + 1) * num_closid;
+	l3->mon.num_rmid = num_rmid * num_closid;
 }
 
 int resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable)
@@ -286,7 +296,7 @@ static bool mpam_resctrl_hide_cdp(enum resctrl_res_level rid)
  */
 u32 resctrl_arch_get_num_closid(struct rdt_resource *ignored)
 {
-	return mpam_partid_max + 1;
+	return mbm_cntr_assign_enabled ? mpam_partid_max + 1 : mpam_capped_num_closid;
 }
 
 u32 resctrl_arch_system_num_rmid_idx(void)
@@ -303,6 +313,15 @@ void resctrl_arch_rmid_idx_decode(u32 idx, u32 *closid, u32 *rmid)
 {
 	*closid = idx / (mpam_pmg_max + 1);
 	*rmid = idx % (mpam_pmg_max + 1);
+}
+
+/*
+ * The CLOSIDs are capped by resctrl_arch_get_num_closid(), and every CLOSID
+ * has the same RMIDs, so @closid does not matter.
+ */
+bool resctrl_arch_rmid_valid(u32 closid, u32 rmid)
+{
+	return mbm_cntr_assign_enabled || rmid < mpam_capped_num_rmid;
 }
 
 void resctrl_arch_sched_in(struct task_struct *tsk)
@@ -525,7 +544,10 @@ static int read_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_component
 			  CDP_NONE, closid, rmid, val);
 }
 
-/* MBWU when not in ABMC mode (not supported), and CSU counters. */
+/*
+ * CSU counters, and MBWU counters through the per-group mapping while the
+ * default assignment mode is used.
+ */
 int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 			   u32 closid, u32 rmid, enum resctrl_event_id eventid,
 			   void *arch_priv, u64 *val, void *arch_mon_ctx)
@@ -547,10 +569,10 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 	l3_dom = container_of(hdr, struct mpam_resctrl_dom, resctrl_mon_dom.hdr);
 	mon_comp = l3_dom->mon_comp[eventid];
 
-	if (eventid != QOS_L3_OCCUP_EVENT_ID)
-		return -EINVAL;
-
-	mon_type = mpam_feat_msmon_csu;
+	if (eventid == QOS_L3_OCCUP_EVENT_ID)
+		mon_type = mpam_feat_msmon_csu;
+	else
+		mon_type = mpam_feat_msmon_mbwu;
 
 	return read_mon_cdp_safe(mon, mon_comp, mon_type, mon_idx,
 				 closid, rmid, val);
@@ -611,6 +633,26 @@ static void reset_mon_cdp_safe(struct mpam_resctrl_mon *mon, struct mpam_compone
 	} else {
 		__reset_mon(mon, mon_comp, mon_idx, CDP_NONE, closid, rmid);
 	}
+}
+
+/* Reset the bandwidth counter of a (closid, rmid) pair through the mapping. */
+void resctrl_arch_reset_rmid(struct rdt_resource *r, struct rdt_l3_mon_domain *d,
+			     u32 closid, u32 rmid, enum resctrl_event_id eventid)
+{
+	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[eventid];
+	struct mpam_resctrl_dom *l3_dom;
+	struct mpam_component *mon_comp;
+
+	if (!mpam_is_enabled())
+		return;
+
+	if (eventid == QOS_L3_OCCUP_EVENT_ID || !mon->class)
+		return;
+
+	l3_dom = container_of(d, struct mpam_resctrl_dom, resctrl_mon_dom);
+	mon_comp = l3_dom->mon_comp[eventid];
+
+	__reset_mon(mon, mon_comp, USE_PRE_ALLOCATED, CDP_NONE, closid, rmid);
 }
 
 /* Reset an assigned counter */
@@ -1244,6 +1286,88 @@ static void mpam_resctrl_pick_counters(void)
 	}
 }
 
+/*
+ * In the default assignment mode every group in the capped CLOSID/RMID space
+ * reads the bandwidth through the counter allocated for it at init. The
+ * entries of the mode that is left are cleared: in the "mbm_event" mode
+ * resctrl fills the map itself when a counter is assigned.
+ */
+static void mpam_resctrl_map_mbwu_mons(bool default_mode)
+{
+	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[QOS_L3_MBM_TOTAL_EVENT_ID];
+	u32 num_grp = mpam_capped_num_closid * mpam_capped_num_rmid;
+	u32 num_idx = resctrl_arch_system_num_rmid_idx();
+
+	if (!mon->mbwu_idx_to_mon || !mon->assigned_counters)
+		return;
+
+	memset(mon->mbwu_idx_to_mon, -1, num_idx * sizeof(*mon->mbwu_idx_to_mon));
+
+	if (!default_mode)
+		return;
+
+	for (u32 i = 0; i < num_grp; i++) {
+		u32 closid = i / mpam_capped_num_rmid;
+		u32 rmid = i % mpam_capped_num_rmid;
+		int mbwu_idx = resctrl_arch_rmid_idx_encode(closid, rmid);
+
+		mon->mbwu_idx_to_mon[mbwu_idx] = mon->assigned_counters[i];
+	}
+}
+
+static void mpam_resctrl_cap_closid_rmid(u32 num_mon, u32 *num_closid,
+					 u32 *num_rmid)
+{
+	*num_closid = min(*num_closid, num_mon);
+	*num_rmid = clamp(num_mon / *num_closid, 1U, *num_rmid);
+}
+
+int resctrl_arch_mbm_cntr_assign_set(struct rdt_resource *r, bool enable)
+{
+	struct mpam_resctrl_mon *mon = &mpam_resctrl_counters[QOS_L3_MBM_TOTAL_EVENT_ID];
+	struct rdt_resource *l3 = &mpam_resctrl_controls[RDT_RESOURCE_L3].resctrl_res;
+	u32 num_closid = mpam_partid_max + 1;
+	u32 num_rmid = mpam_pmg_max + 1;
+
+	lockdep_assert_cpus_held();
+
+	if (r != l3 || !r->mon.mbm_cntr_assignable)
+		return -EINVAL;
+
+	if (enable == mbm_cntr_assign_enabled)
+		return 0;
+
+	if (!enable) {
+		/*
+		 * Give every group in the capped space one of the counters
+		 * allocated at init. Cap the CLOSIDs and the RMIDs per
+		 * CLOSID to the number of counters, shrinking the RMIDs
+		 * first and keeping one per CLOSID for the default monitor
+		 * group, so that every group in the space has a monitor.
+		 */
+		if (mon->class) {
+			mpam_resctrl_cap_closid_rmid(mon->class->props.num_mbwu_mon,
+						     &num_closid, &num_rmid);
+
+			if (mon->class->props.num_mbwu_mon < 2)
+				pr_warn("MPAM: only %u bandwidth counter, so only the default group can be measured\n",
+					mon->class->props.num_mbwu_mon);
+		}
+
+		mpam_capped_num_closid = num_closid;
+		mpam_capped_num_rmid = num_rmid;
+	}
+
+	/* The entries of the mode that is left are cleared first. */
+	mpam_resctrl_map_mbwu_mons(!enable);
+
+	mbm_cntr_assign_enabled = enable;
+
+	mpam_resctrl_set_num_rmid();
+
+	return 0;
+}
+
 static void __config_cntr(struct mpam_resctrl_mon *mon, u32 cntr_id,
 			  enum resctrl_conf_type cdp_type, u32 closid, u32 rmid,
 			  bool assign)
@@ -1398,7 +1522,7 @@ static int mpam_resctrl_monitor_init_abmc(struct mpam_resctrl_mon *mon)
 	l3->mon.mbm_cntr_assignable = true;
 	l3->mon.mbm_assign_on_mkdir = true;
 	l3->mon.mbm_cntr_configurable = false;
-	l3->mon.mbm_cntr_assign_fixed = true;
+	l3->mon.mbm_cntr_assign_fixed = false;
 
 	mpam_resctrl_monitor_sync_abmc_vals(l3);
 
