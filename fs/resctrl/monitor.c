@@ -1583,11 +1583,63 @@ int resctrl_mbm_assign_mode_show(struct kernfs_open_file *of,
 	return 0;
 }
 
+/**
+ * resctrl_mbm_assign_mode_set() - Switch the counter assignment mode and
+ *				the state that differs between the modes.
+ * @r:		The L3 resource to switch the mode of
+ * @enable:	Switch to the "mbm_event" mode, or to the default one
+ *
+ * Does nothing when the mode is already the requested one. Switching
+ * resets the event configuration and the counter and RMID state, and
+ * enables the assignment on mkdir for the "mbm_event" mode. The
+ * visibility of the BMEC files is left to the caller, as the files only
+ * exist while resctrl is mounted, and the mount switches the mode
+ * before the files are created.
+ *
+ * Context: rdtgroup_mutex held, and the CPU hotplug lock.
+ * Return: 0 on success, or a negative error code from the architecture.
+ */
+int resctrl_mbm_assign_mode_set(struct rdt_resource *r, bool enable)
+{
+	struct rdt_l3_mon_domain *d;
+	int ret;
+
+	if (enable == resctrl_arch_mbm_cntr_assign_enabled(r))
+		return 0;
+
+	ret = resctrl_arch_mbm_cntr_assign_set(r, enable);
+	if (ret)
+		return ret;
+
+	/*
+	 * Initialize the default memory transaction values for
+	 * total and local events.
+	 */
+	if (resctrl_is_mon_event_enabled(QOS_L3_MBM_TOTAL_EVENT_ID))
+		mon_event_all[QOS_L3_MBM_TOTAL_EVENT_ID].evt_cfg = r->mon.mbm_cfg_mask;
+	if (resctrl_is_mon_event_enabled(QOS_L3_MBM_LOCAL_EVENT_ID))
+		mon_event_all[QOS_L3_MBM_LOCAL_EVENT_ID].evt_cfg = r->mon.mbm_cfg_mask &
+								   (READS_TO_LOCAL_MEM |
+								    READS_TO_LOCAL_S_MEM |
+								    NON_TEMP_WRITE_TO_LOCAL_MEM);
+	/* Enable auto assignment when switching to "mbm_event" mode */
+	if (enable)
+		r->mon.mbm_assign_on_mkdir = true;
+	/*
+	 * Reset all the non-achitectural RMID state and assignable counters.
+	 */
+	list_for_each_entry_rcu(d, &r->mon_domains, hdr.list, lockdep_is_cpus_held()) {
+		mbm_cntr_free_all(r, d);
+		resctrl_reset_rmid_all(r, d);
+	}
+
+	return 0;
+}
+
 ssize_t resctrl_mbm_assign_mode_write(struct kernfs_open_file *of, char *buf,
 				      size_t nbytes, loff_t off)
 {
 	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
-	struct rdt_l3_mon_domain *d;
 	int ret = 0;
 	bool enable;
 
@@ -1628,34 +1680,12 @@ ssize_t resctrl_mbm_assign_mode_write(struct kernfs_open_file *of, char *buf,
 			goto out_unlock;
 		}
 
-		ret = resctrl_arch_mbm_cntr_assign_set(r, enable);
+		ret = resctrl_mbm_assign_mode_set(r, enable);
 		if (ret)
 			goto out_unlock;
 
 		/* Update the visibility of BMEC related files */
 		resctrl_bmec_files_show(r, NULL, !enable);
-
-		/*
-		 * Initialize the default memory transaction values for
-		 * total and local events.
-		 */
-		if (resctrl_is_mon_event_enabled(QOS_L3_MBM_TOTAL_EVENT_ID))
-			mon_event_all[QOS_L3_MBM_TOTAL_EVENT_ID].evt_cfg = r->mon.mbm_cfg_mask;
-		if (resctrl_is_mon_event_enabled(QOS_L3_MBM_LOCAL_EVENT_ID))
-			mon_event_all[QOS_L3_MBM_LOCAL_EVENT_ID].evt_cfg = r->mon.mbm_cfg_mask &
-									   (READS_TO_LOCAL_MEM |
-									    READS_TO_LOCAL_S_MEM |
-									    NON_TEMP_WRITE_TO_LOCAL_MEM);
-		/* Enable auto assignment when switching to "mbm_event" mode */
-		if (enable)
-			r->mon.mbm_assign_on_mkdir = true;
-		/*
-		 * Reset all the non-achitectural RMID state and assignable counters.
-		 */
-		list_for_each_entry_rcu(d, &r->mon_domains, hdr.list, lockdep_is_cpus_held()) {
-			mbm_cntr_free_all(r, d);
-			resctrl_reset_rmid_all(r, d);
-		}
 	}
 
 out_unlock:
