@@ -1702,6 +1702,13 @@ int resctrl_mbm_assign_mode_set(struct rdt_resource *r, bool enable)
 	struct rdt_l3_mon_domain *d;
 	int ret;
 
+	/*
+	 * The MBA software controller measures every group, which would
+	 * lose its counter.
+	 */
+	if (enable && resctrl_arch_get_resource(RDT_RESOURCE_MBA)->membw.mba_sc)
+		return -EBUSY;
+
 	if (enable == resctrl_arch_mbm_cntr_assign_enabled(r))
 		return 0;
 
@@ -1779,6 +1786,8 @@ ssize_t resctrl_mbm_assign_mode_write(struct kernfs_open_file *of, char *buf,
 		}
 
 		ret = resctrl_mbm_assign_mode_set(r, enable);
+		if (ret == -EBUSY)
+			rdt_last_cmd_puts("mbm_assign_mode: mba_MBps needs the default mode\n");
 		if (ret)
 			goto out_unlock;
 

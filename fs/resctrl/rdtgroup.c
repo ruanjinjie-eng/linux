@@ -2610,10 +2610,10 @@ static void mba_sc_domain_destroy(struct rdt_resource *r,
  * The MBA software controller is supported only if MBM is supported and MBA is
  * in linear scale, and the MBM monitor scope is the same as MBA control scope.
  *
- * The software controller cannot be supported when the MBM counters are
- * assignable.  There is no guarantee that MBM counters are assigned to the
- * event backing the software controller in all monitoring domains of all
- * monitoring groups.
+ * The controller measures every monitoring group, so every group needs
+ * a counter for the event selected by mba_MBps_event. Counters that
+ * are not assignable always provide one, and mounting switches
+ * assignable counters to the default mode, which has to be switchable.
  *
  * The maximum control must also be a hard limit, see max_is_soft_limit.
  */
@@ -2626,8 +2626,15 @@ static bool supports_mba_mbps(void)
 		r->alloc_capable && is_mba_linear() &&
 		r->ctrl_scope == rmbm->mon_scope &&
 		!r->membw.max_is_soft_limit &&
-		!rmbm->mon.mbm_cntr_assignable);
+		(!rmbm->mon.mbm_cntr_assignable ||
+		 !rmbm->mon.mbm_cntr_assign_fixed));
 }
+
+/*
+ * Set while the MBA software controller is enabled and its mount switched
+ * the counter assignment mode, which is restored when it is disabled.
+ */
+static bool mba_sc_switched_mode;
 
 /*
  * Enable or disable the MBA software controller
@@ -2635,26 +2642,51 @@ static bool supports_mba_mbps(void)
  */
 static int set_mba_sc(bool mba_sc)
 {
+	struct rdt_resource *rmbm = resctrl_arch_get_resource(RDT_RESOURCE_L3);
 	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_MBA);
-	u32 num_closid = resctrl_arch_get_num_closid(r);
 	struct rdt_ctrl_domain *d;
 	unsigned long fflags;
-	int i;
+	int i, ret;
 
 	if (!supports_mba_mbps() || mba_sc == is_mba_sc(r))
 		return -EINVAL;
+
+	if (mba_sc) {
+		/*
+		 * The controller measures every monitoring group, so every
+		 * group needs a counter. Switch before the number of CLOSIDs
+		 * is read below, as the switch caps it.
+		 */
+		mba_sc_switched_mode = resctrl_arch_mbm_cntr_assign_enabled(rmbm);
+		ret = resctrl_mbm_assign_mode_set(rmbm, false);
+		if (ret) {
+			mba_sc_switched_mode = false;
+			rdt_last_cmd_puts("mba_MBps: cannot switch the assignment mode\n");
+			return ret;
+		}
+	}
 
 	r->membw.mba_sc = mba_sc;
 
 	rdtgroup_default.mba_mbps_event = mba_mbps_default_event;
 
-	list_for_each_entry_rcu(d, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
-		for (i = 0; i < num_closid; i++)
-			d->mbps_val[i] = MBA_MAX_MBPS;
+	if (mba_sc) {
+		u32 num_closid = resctrl_arch_get_num_closid(r);
+
+		list_for_each_entry_rcu(d, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
+			for (i = 0; i < num_closid; i++)
+				d->mbps_val[i] = MBA_MAX_MBPS;
+		}
 	}
 
 	fflags = mba_sc ? RFTYPE_CTRL_BASE | RFTYPE_MON_BASE : 0;
 	resctrl_file_fflags_init("mba_MBps_event", fflags);
+
+	if (!mba_sc && mba_sc_switched_mode) {
+		mba_sc_switched_mode = false;
+		if (resctrl_mbm_assign_mode_set(rmbm, true))
+			pr_warn("Failed to restore the counter assignment mode\n");
+	}
 
 	return 0;
 }
